@@ -1,23 +1,23 @@
 # Clocktopus🐙🕰️🎛️
 Clocktopus is a small, friendly device that invites up to 8 of your electronic instruments to play together — in time and in sync.
 
-If you've ever tried to get two or more electronic instruments, drum machines, sequencers, or synthesisers to lock into the same rhythm at the same time, you'll know the frustration: mismatched sync rates, incompatible ports or even tempo drifts.  By the time you've found some kind of compromise amidst troubleshooting sync issues, you're out of breath and inspiration is hampered.
+If you've ever tried to get two or more electronic instruments, drum machines, sequencers, or synthesisers to lock into the same rhythm at the same time, you'll know the frustration: mismatched sync rates, incompatible ports or even tempo drifts.  By the time you've found some kind of compromise amidst troubleshooting sync issues and cables, you're out of breath, your inspiration ensnared.
 
-Clocktopus solves this. Plug it in, connect your gear and press the inviting, glowing 'start' button — up to 8 of you (or your band's) instruments undulate together to the tempo-locked, pulsing glow.  Adjust the big, chunky tempo dial and your session's instruments speed up and slow down, breathing as one.
+Clocktopus solves this. Plug it in, connect your gear and press the glowing start button.  Up to 8 of you (or your band's) instruments undulate together to the tempo-locked, pulsing glow.  Adjust the big, chunky tempo dial and your session's instruments speed up and slow down, breathing as one.
 
 At the heart of Clocktopus is a reliable, high-resolution clock that can send precise, indepedendent rhythmic subdivisions and swing to each of it’s 8 ports.
 
-Each port is powered by a robust, rock-solid hardware-based clock system with isolated per-port UART/GPIO connections.
+Each port is powered by a robust, hardware-based clock system with isolated per-port UART/GPIO connections ensuring jitter-free operation.
 
-A single, satisfying push-click detented encoder lets you navigate a simple on-device menu system to configure each port's settings independently.
+A single, satisfying push-click detented encoder lets you navigate a simple on-device menu system to configure each port's settings independently.  Clock divisions, PPQ, swing and per-port switching between MIDI clock and CV pulse are all configured within.
 
-Additionally, Clocktpus sends synchronized clock data over USB directly to your computer’s DAW, so you can integrate it effortlessly into your home and professional studio productions. 
+Additionally, Clocktpus sends synchronized clock data over USB directly to your computer’s DAW, so you can integrate it effortlessly into your session.
 
-With each port's dual 3.5mm TRS MIDI and CV/gate jacks you can thus send unique rhythmic subdivision and swing per port, ensuring broad compatibility (and playability!) across your ecosystem of common MIDI, Eurorack modular, and boutique musical instruments.
+With each port's dual 3.5mm TRS MIDI and CV/gate jacks you can thus send unique rhythmic subdivisions and swing per port, reliably synced to a main clock and ensuring broad compatibility (and playability!) across your ecosystem of common MIDI, Eurorack modular, and boutique musical instruments.
 
 Additional, TRS Type A to DIN (5-pin) and TRS Type A to Type B adapters are also included, so your other instruments are not left behind.  
 
-With it's open-source GPL firmware, Clocktopus can be further fine-tuned or even infused with other polyrhythmic clock/rhythym cultures to enrich your musical experiences and exchanges.
+With it's open-source GPL firmware, you can further fine-tune or infuse other polyrhythmic clock/rhythym cultures to enrich your musical experiences and exchanges.
 
 Clocktopus allows electronic instruments to breathe, sync and undulate together.  
 
