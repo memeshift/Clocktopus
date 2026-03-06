@@ -62,11 +62,6 @@ Clocktopus takes the stress out of syncing your gear, allowing you to relinquish
   from straight (50%) to heavy swing (90%), so individual instruments can
   feel different while staying locked together
 - **Tap tempo** — set the tempo by feel, by tapping in time
-  
-  COMING SOON:
-- **Half / Double speed switch** — instantly halves or doubles the effective
-  tempo across all outputs simultaneously, without stopping the clock
-
 
 ---
 
@@ -74,21 +69,20 @@ Clocktopus takes the stress out of syncing your gear, allowing you to relinquish
 
 - **One-button Start / Stop** — large illuminated button for confident
   stage use
-- **Double-press Resync** — press twice quickly to snap all outputs back
+- **Double-press Resync** — tap twice quickly to snap all outputs back
   to beat one without stopping playback; useful for correcting device-originating drift or
   re-locking after a transition
-- **Instant half / double speed** — three-position toggle switch for
-  real-time tempo doubling or halving mid-performance
 
 ---
 
 ## Visual Feedback
 
+- **Colour-coded Start / Stop Button** — red for clock stopped, green for clock running
 - **8 independent RGB LEDs** — one per output, each pulsing at that
   port's own clock rate so you can see the rhythmic structure of your
   whole setup at a glance
 - **Colour-coded by output type** — blue glow for MIDI outputs, green
-  glow for CV outputs, white flash on every clock pulse
+  glow for CV outputs, white flash for main clock pulse
 - **OLED display** — shows current BPM, running/stopped status, selected
   port, and all per-port settings; three-level navigation menu for
   configuring each output
@@ -109,6 +103,7 @@ Clocktopus takes the stress out of syncing your gear, allowing you to relinquish
 ## Per-Port Settings (configurable per output)
 
 - Output type: MIDI or CV
+- Time shift
 - Clock division / subdivision
 - Swing amount
 - Enable / disable
@@ -144,6 +139,7 @@ and Korg Volca series (via Volca preset).
 - TRS Type A to 5-pin DIN adapter cable
 - TRS Type A to TRS Type B adapter cable
 - USB cable
+- Manual
 
 ---
 
