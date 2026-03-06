@@ -7,10 +7,13 @@
 //    - 8x MIDI outputs via hardware UARTs (Serial1–Serial8)
 //    - 8x Eurorack CV outputs via GPIO + 74AHCT125 level shifter
 //    - 8x WS2812B NeoPixel LEDs (one per port)
-//    - Encoder 1 (pins 14,15) — Tempo
-//    - Encoder 2 (pins 18,19) — Port config navigation
+//    - Encoder 1 (pins 14,15) — Tempo (non-detented / smooth)
+//    - Encoder 2 (pins 18,19) — Port config navigation (detented with push button)
 //    - Nav encoder button (pin 23)
 //    - Start/Stop button (pin 20)
+//    - Start/Stop button bicolour LED: green (pin 25, PWM), red (pin 26, PWM)
+//      Frosted clear button cap. Green breathes to BPM when running.
+//      Red glows dim steady when stopped.
 //    - Speed switch HALF (pin 21), DOUBLE (pin 22)
 //    - OLED display 128x64 I2C (SSD1306, address 0x3C)
 //    - NeoPixel data pin 24
@@ -53,6 +56,13 @@ const uint8_t NAV_BTN_PIN    = 23;   // Nav encoder push button
 const uint8_t LED_PIN   = 24;
 const uint8_t LED_COUNT = 8;
 
+// Start/Stop button bicolour LED pins
+// Uses a bicolour (common-cathode) LED inserted into a frosted clear button cap.
+// Green = clock running (breathing to BPM), Red = clock stopped (steady dim).
+// Both pins must support analogWrite() / PWM on Teensy 4.1.
+const uint8_t BTN_LED_GREEN = 25;   // PWM pin — green LED anode
+const uint8_t BTN_LED_RED   = 26;   // PWM pin — red LED anode
+
 // Encoder pins (must be interrupt-capable pins on Teensy 4.1)
 // Encoder 1: Tempo  — pins 14, 15
 // Encoder 2: Nav    — pins 18, 19
@@ -73,6 +83,13 @@ const uint16_t CV_PULSE_WIDTH_US = 5000;
 
 // LED flash duration in milliseconds
 const uint16_t LED_FLASH_DURATION = 30;
+
+// Start/Stop button LED brightness levels (0–255 for analogWrite)
+// Green channel: breathes between these limits in sync with BPM when running.
+// Red channel: steady dim glow when stopped, off when running.
+const uint8_t BTN_LED_GREEN_MIN  =  8;   // dimmest point of the breathing cycle
+const uint8_t BTN_LED_GREEN_MAX  = 220;  // brightest point of the breathing cycle
+const uint8_t BTN_LED_RED_IDLE   = 40;   // steady dim red when clock is stopped
 
 // Double-press window for resync (milliseconds)
 const uint16_t DOUBLE_PRESS_MS = 400;
@@ -231,6 +248,28 @@ bool      displayNeedsUpdate = true;
 
 uint32_t ledFlashTime[8] = {0};  // millis() timestamp of last pulse per port
 
+// ============================================================================
+//  GLOBAL STATE — START/STOP BUTTON LED
+//
+//  The button contains a bicolour LED (green/red) behind a frosted clear cap.
+//  When running: green channel breathes in a sine curve locked to quarter-note BPM.
+//  When stopped: red channel glows at a steady dim level.
+//
+//  The breathing uses a quarter-note period derived from pulseIntervalMicros.
+//  We track phase as a 0.0–1.0 float updated each loop() call.
+// ============================================================================
+
+// Phase position within the current quarter-note breath cycle (0.0 = start, 1.0 = end)
+float   btnLedPhase         = 0.0f;
+
+// micros() timestamp of when the current quarter-note cycle started
+uint32_t btnLedCycleStart   = 0;
+
+// Duration of one quarter-note in microseconds — updated whenever BPM changes
+// (a copy kept here so the LED logic doesn't have to reach into pulseIntervalMicros
+//  and multiply — just read this directly)
+volatile uint32_t quarterNoteMicros = 500000;  // default: 120 BPM
+
 
 // ============================================================================
 //  GLOBAL STATE — BUTTONS
@@ -284,6 +323,9 @@ void updateBPM(float newBPM) {
   // = 60,000,000 µs/min  ÷  (BPM × speedMultiplier × INTERNAL_PPQN)
   pulseIntervalMicros = (uint32_t)(60000000.0f /
                         (bpm * speedMultiplier * (float)INTERNAL_PPQN));
+  // Quarter-note duration for button LED breathing cycle
+  // = 60,000,000 µs/min  ÷  (BPM × speedMultiplier)
+  quarterNoteMicros = (uint32_t)(60000000.0f / (bpm * speedMultiplier));
 }
 
 // Recompute swing delay for every port
@@ -651,7 +693,71 @@ void handleStartStopButton() {
 
 
 // ============================================================================
-//  TAP TEMPO
+//  START/STOP BUTTON LED — BREATHING GLOW
+//
+//  Call from loop() on every iteration. Non-blocking.
+//
+//  When RUNNING:
+//    Green channel breathes in a sine curve over one quarter-note period.
+//    The sine wave gives an organic "lung-like" feel — slow fade in,
+//    peak at the beat, slow fade out — rather than a mechanical linear ramp.
+//    Red channel is off.
+//
+//  When STOPPED:
+//    Red channel holds a steady dim glow (BTN_LED_RED_IDLE).
+//    Green channel is off.
+//
+//  How the sine breathing works:
+//    phase = elapsed time within current beat / quarter-note duration  (0.0–1.0)
+//    brightness = sin(phase × π)  maps 0→0, 0.5→1.0 (peak), 1.0→0
+//    This produces one smooth arch per beat, peaking at the midpoint.
+//    We then scale into the BTN_LED_GREEN_MIN … BTN_LED_GREEN_MAX range
+//    so the LED never fully extinguishes (always a faint glow is visible).
+// ============================================================================
+
+void updateButtonLED() {
+  if (clockRunning) {
+    // ── Advance phase within the current quarter-note cycle ──────────────────
+    uint32_t now     = micros();
+    uint32_t elapsed = now - btnLedCycleStart;
+
+    // If we've passed the end of this beat, roll over to the next cycle.
+    // This naturally re-locks to tempo even if loop() is occasionally slow.
+    if (elapsed >= quarterNoteMicros) {
+      btnLedCycleStart += quarterNoteMicros;   // advance by exactly one beat
+      elapsed = now - btnLedCycleStart;         // recalculate with rolled-over start
+      // Guard against multiple missed beats (e.g. after pause in loop)
+      if (elapsed >= quarterNoteMicros) {
+        btnLedCycleStart = now;
+        elapsed = 0;
+      }
+    }
+
+    // Phase 0.0 (beat start) → 1.0 (beat end)
+    btnLedPhase = (float)elapsed / (float)quarterNoteMicros;
+
+    // ── Sine curve: arch from 0 → 1 → 0 over one beat ────────────────────────
+    // sin(0) = 0, sin(π/2) = 1, sin(π) = 0
+    float sinVal = sinf(btnLedPhase * 3.14159265f);  // 0.0 – 1.0
+
+    // ── Scale to desired brightness range ────────────────────────────────────
+    uint8_t brightness = (uint8_t)(
+      BTN_LED_GREEN_MIN + sinVal * (BTN_LED_GREEN_MAX - BTN_LED_GREEN_MIN)
+    );
+
+    analogWrite(BTN_LED_GREEN, brightness);
+    analogWrite(BTN_LED_RED,   0);           // red fully off when running
+
+  } else {
+    // ── Stopped: steady dim red, green off ───────────────────────────────────
+    analogWrite(BTN_LED_GREEN, 0);
+    analogWrite(BTN_LED_RED,   BTN_LED_RED_IDLE);
+
+    // Reset cycle start so breathing begins cleanly on next startClock()
+    btnLedCycleStart = micros();
+    btnLedPhase      = 0.0f;
+  }
+}
 //  Connect a dedicated tap button and call this from loop() when it's pressed.
 //  Averages the last 3 tap intervals for stability.
 //  (Optional — wire to a second button or use a long-press on start/stop button)
@@ -892,6 +998,13 @@ void setup() {
   pinMode(SW_HALF,        INPUT_PULLUP);
   pinMode(SW_DOUBLE,      INPUT_PULLUP);
 
+  // Start/Stop button bicolour LED — PWM output pins
+  pinMode(BTN_LED_GREEN, OUTPUT);
+  pinMode(BTN_LED_RED,   OUTPUT);
+  analogWrite(BTN_LED_GREEN, 0);
+  analogWrite(BTN_LED_RED,   BTN_LED_RED_IDLE);  // start showing stopped state
+  btnLedCycleStart = micros();
+
   // Calculate initial timing values
   updateBPM(120.0f);
   updateSwingDelays();
@@ -944,6 +1057,7 @@ void loop() {
   updateCVPulseOff();        // Turn off CV pulses whose time has elapsed
   updateCVSwingTriggers();   // Fire any swing-delayed CV pulses
   updateAllLEDs();           // Update NeoPixel LEDs (per-port, independent rhythm)
+  updateButtonLED();         // Breathe Start/Stop button LED to BPM (green=running, red=stopped)
 
   if (displayNeedsUpdate) {
     updateDisplay();         // Refresh OLED only when something changed
