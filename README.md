@@ -9,7 +9,7 @@ At the heart of Clocktopus is a reliable, high-resolution clock that can send pr
 
 You can configure each of these on a per-port basis and send this clock to either a 3.5mm TRS MIDI or CV/gate jack (adapters are included separately) for each port, ensuring broad compatibility (and playability!) across your ecosystem of common MIDI, Eurorack modular, and boutique musical instruments.
 
-Finally, with it's open-source firmware, you can fine-tune Clocktopus's existing features or add entirely new ones.  Think tempo-synced, CV LFO output or odd time signatures per port. Or perhaps you'd want to add an entirely different clock system based on other musical traditions, like  West African djembe cycles, Indian tala systems, or Indonesian gamelan. The possibilites are endless. 
+Finally, with it's open-source firmware, you can fine-tune Clocktopus's existing features or add entirely new ones: think tempo-synced, CV LFO output or odd time signatures per port. Or perhaps you'd want to add an entirely different clock system based on other musical traditions, like  West African djembe cycles, Indian tala systems, or Indonesian gamelan. The possibilites are endless. 
 
 Clocktopus takes the stress out of syncing your gear, allowing you to focus on the musical exchange of the moment.
 
