@@ -1,15 +1,15 @@
 # Clocktopus🐙🕰️🎛️
 Clocktopus is a small, friendly device that allows up to 8 electronic instruments to play together — in time and in sync.
 
-If you've ever tried to get two or more electronic instruments, drum machines, sequencers, or synthesisers to lock into the same rhythm at the same time, you'll know the frustration: mismatched sync rates, incompatible ports or even tempo drifts.  By the time you've found some kind of compromise amidst troubleshooting sync issues and cables, you're out of breath, your inspiration ensnared.
+If you've ever tried to get two or more electronic instruments, drum machines, sequencers, or synthesisers to lock into the same rhythm at the same time, you'll know the frustration: mismatched sync rates, incompatible ports or even tempo drifts.  By the time you've found some kind of compromise amidst troubleshooting your sync issues, you're out of breath, your inspiration ensnared.
 
 Clocktopus solves this. Plug it in, connect your gear and press the glowing start button.  Up to 8 of you (or your band's) instruments undulate together to the tempo-locked, pulsing glow. Adjust the big, chunky tempo dial and your session's instruments speed up and slow down, breathing as one.
 
-At the heart of Clocktopus lies a precise, high-resolution clock timer that sends stable, jitter-free sync signals to its 8 ports. Each port can be independently configured to send time-shifted, rhythmic subdivisions (with swing) to either a 3.5mm TRS MIDI or CV/gate jack output, ensuring seamless sync compatibility (and playability!) across MIDI, Eurorack, and boutique instruments.
+At the heart of Clocktopus lies a precise, high-resolution clock timer that sends stable, jitter-free sync signals to its 8 ports. Each port can be independently configured to send time-shifted, rhythmic subdivisions (with swing) to either a 3.5mm TRS MIDI or CV/gate jack output, ensuring seamless sync compatibility (and playability!) across various MIDI, Eurorack, and boutique instruments.
 
-Finally, with it's open-source firmware, you can fine-tune Clocktopus's existing features or add entirely new ones: think tempo-synced, CV LFO output or odd time signatures per port. Or perhaps you'd want to add an entirely different clock system based on West African djembe cycles, Indian tala systems, or Indonesian gamelan. The possibilites are endless. 
+Finally, with it's open-source firmware, you can fine-tune Clocktopus's existing features or add entirely new ones: think tempo-synced, CV LFO output or odd time signatures per port. Or perhaps you'd want to add a different clock or polyrhythmic system based on West African djembe cycles, Indian tala systems, or Indonesian gamelan. Musical curiousity is encouraged.
 
-Clocktopus takes the stress out of syncing your gear, allowing you to relinquish yourself to the musical pulse of the moment.
+Clocktopus soothes the stress of syncing your gear, allowing you to relinquish yourself to the musical pulse of the moment.
 
 
 # Clocktopus — Feature List
