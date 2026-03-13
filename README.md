@@ -18,7 +18,7 @@ Clocktopus soothes the stress of syncing your gear, allowing you to relinquish y
 
 ## Connectivity
 
-- **8 independent outputs** — each individually configurable as either MIDI
+- **8 independent clock outputs** — each individually configurable as either MIDI
   or CV/gate clock
 - **MIDI outputs** via 3.5mm TRS Type A jacks — the current standard across
   modern hardware synthesisers, sequencers, and drum machines
