@@ -27,6 +27,63 @@
 
 
 // ============================================================================
+//  CHANGELOG
+//
+//  v0.2  — 2026-04-04
+//    FIXED   Division table tick values were 4× too small. The internal clock
+//            runs at 96 PPQN (ticks per quarter note), so a whole note needs
+//            384 ticks (96×4), not 96. Every musical label in the old table
+//            was shifted by two positions — a device set to "Quarter" was
+//            actually outputting 16th notes. All values corrected.
+//            (divisionTicks type upgraded from uint8_t to uint16_t to hold 384.)
+//
+//    FIXED   portTickCount[] type upgraded from uint8_t to uint16_t to match
+//            the corrected division table (384 overflows a uint8_t).
+//
+//    FIXED   Swing delay base calculation was wrong. The code calculated
+//            `pulseIntervalMicros × 12` and labelled it "one 8th note", but
+//            12 ticks at 96 PPQN is a 32nd note. Swing delay was 4× too small
+//            and nearly inaudible. Fixed to `pulseIntervalMicros × 48`
+//            (= one 8th note = half a quarter note at 96 PPQN).
+//
+//    FIXED   Volca sync rate corrected to 2 PPQN (confirmed for Korg Volca
+//            hardware sync port). At 96 PPQN internal, 2 PPQN = 48 ticks per
+//            pulse (same period as an 8th note). Old code used 6 ticks and
+//            labelled it "16th note rate", which was wrong for Volca.
+//
+//    FIXED   Race conditions: arrays shared between clockISR and loop() now
+//            declared volatile so the compiler always reads/writes memory
+//            directly rather than caching values in registers.
+//            Affected: ledFlashTime[], cvPulseOffTime[], cvSwingTriggerTime[],
+//            swingDelayMicros[], portTickCount[].
+//
+//    FIXED   clockTimer.priority(0) now set explicitly after clockTimer.begin()
+//            in startClock() and resyncClock(). Priority 0 = highest on
+//            Teensy 4.1, ensuring the clock ISR cannot be delayed by any
+//            other interrupt. Timing accuracy is the core purpose of this device.
+//
+//    FIXED   Port type change (MIDI ↔ CV) now safely pauses the clock if it
+//            is running, applies the change, then restarts. This prevents the
+//            ISR from writing to a UART that is being re-initialised, which
+//            could cause a crash. In practice users set port types before a
+//            session and press stop before changing hardware connections anyway.
+//
+//    REMOVED Dead variable midiTickCount[8]. It was declared and reset in
+//            start/resync but never read or written during clock operation.
+//            Removing it cleans up 8 bytes of RAM and eliminates confusion.
+//
+//    NOTED   millis() inside clockISR (for ledFlashTime) is noted as safe on
+//            Teensy 4.1 at high priority but may return a slightly stale value
+//            (~1ms) if SysTick priority is lower. For LED flashing this is
+//            imperceptible and accepted for now.
+//
+//  v0.1  — 2026-03-01
+//    Initial build. 8-port MIDI/CV clock, per-port swing, NeoPixel LEDs,
+//    OLED display, start/stop button with bicolour breathing LED, tap tempo.
+// ============================================================================
+
+
+// ============================================================================
 //  INCLUDES
 // ============================================================================
 
@@ -97,8 +154,15 @@ const uint16_t DOUBLE_PRESS_MS = 400;
 // Long press threshold for nav encoder (milliseconds)
 const uint16_t LONG_PRESS_MS = 600;
 
-// Internal resolution: 96 PPQN gives clean division for all musical values
-// (96 divides evenly into whole/half/quarter/8th/16th/32nd notes)
+// Internal resolution: 96 PPQN (ticks per quarter note).
+// 96 divides cleanly into all standard musical subdivisions:
+//   Whole note  = 96 × 4 = 384 ticks
+//   Half note   = 96 × 2 = 192 ticks
+//   Quarter     = 96 × 1 =  96 ticks
+//   8th note    = 96 / 2 =  48 ticks
+//   16th note   = 96 / 4 =  24 ticks
+//   32nd note   = 96 / 8 =  12 ticks
+//   MIDI 24PPQ  = 96 / 24=   4 ticks
 const uint8_t INTERNAL_PPQN = 96;
 
 
@@ -135,7 +199,7 @@ enum PortType {
 
 // Configuration for one port
 struct PortConfig {
-  PortType type;       // MIDI or CV
+  PortType type;      // MIDI or CV
   uint8_t  division;  // Index into divisionNames[] / divisionTicks[]
   uint8_t  swing;     // Swing percentage: 50 = straight, 90 = heavy swing
   bool     enabled;   // Whether this port is active
@@ -146,40 +210,48 @@ struct PortConfig {
 //  CLOCK DIVISION TABLES
 // ============================================================================
 //
-//  divisionTicks[] = how many internal ticks (at 96 PPQN) between CV pulses
-//  divisionNames[] = human-readable label shown on OLED
+//  divisionTicks[] = how many internal ticks (at 96 PPQN) before firing a pulse.
+//  The internal timer fires 96 times per quarter note, so:
 //
-//  96 ticks = whole note (1 per bar)
-//  48 ticks = half note
-//  24 ticks = quarter note   (standard "1 pulse per beat")
-//  12 ticks = 8th note
-//   6 ticks = 16th note
-//   3 ticks = 32nd note
-//   1 tick  = raw MIDI clock rate (24 pulses per quarter note)
-//   6 ticks = Volca sync (same as 16th note — Korg Volca expects this rate)
+//   384 ticks = whole note   (4 beats × 96)
+//   192 ticks = half note    (2 beats × 96)
+//    96 ticks = quarter note (1 beat  × 96)
+//    48 ticks = 8th note     (half beat)
+//    24 ticks = 16th note    (quarter beat)
+//    12 ticks = 32nd note    (eighth beat)
+//     4 ticks = MIDI 24PPQN  (96 ÷ 24 — raw standard MIDI clock rate)
+//    48 ticks = Volca sync   (2 PPQN = 2 pulses per quarter note = 96 ÷ 2)
+//               Note: Volca hardware sync port expects 2 PPQN, confirmed for
+//               Korg Volca series. Same tick count as an 8th note but labelled
+//               separately for clarity in the UI.
+//
+//  IMPORTANT: divisionTicks[] uses uint16_t because 384 overflows uint8_t (max 255).
+//  portTickCount[] must also be uint16_t for the same reason.
 
 const uint8_t NUM_DIVISIONS = 8;
 
 const char* divisionNames[NUM_DIVISIONS] = {
-  "Whole",      // index 0
-  "Half",       // index 1
-  "Quarter",    // index 2
-  "8th",        // index 3
-  "16th",       // index 4
-  "32nd",       // index 5
-  "MIDI(24)",   // index 6 — raw 24 PPQN MIDI clock rate
-  "Volca"       // index 7 — Korg Volca sync (16th note pulse rate)
+  "Whole",     // index 0 — 1 pulse per bar (4/4)
+  "Half",      // index 1 — 2 pulses per bar
+  "Quarter",   // index 2 — 4 pulses per bar (1 per beat)
+  "8th",       // index 3 — 8 pulses per bar
+  "16th",      // index 4 — 16 pulses per bar
+  "32nd",      // index 5 — 32 pulses per bar
+  "MIDI(24)",  // index 6 — raw 24 PPQN MIDI clock
+  "Volca"      // index 7 — Korg Volca hardware sync (2 PPQN)
 };
 
-const uint8_t divisionTicks[NUM_DIVISIONS] = {
-  96,  // whole note
-  48,  // half note
-  24,  // quarter note
-  12,  // 8th note
-   6,  // 16th note
-   3,  // 32nd note
-   4,  // MIDI 24PPQN (96/24 = 4 ticks per MIDI clock pulse)
-   6   // Volca (same as 16th note)
+// FIXED v0.2: All values corrected. Was 4× too small due to misreading PPQN.
+// Type is uint16_t — 384 does not fit in uint8_t.
+const uint16_t divisionTicks[NUM_DIVISIONS] = {
+  384,  // whole note   (96 × 4)
+  192,  // half note    (96 × 2)
+   96,  // quarter note (96 × 1)
+   48,  // 8th note     (96 / 2)
+   24,  // 16th note    (96 / 4)
+   12,  // 32nd note    (96 / 8)
+    4,  // MIDI 24PPQN  (96 / 24)
+   48   // Volca 2PPQN  (96 / 2) — same period as 8th note
 };
 
 
@@ -187,58 +259,61 @@ const uint8_t divisionTicks[NUM_DIVISIONS] = {
 //  GLOBAL STATE — CLOCK
 // ============================================================================
 
-volatile float    bpm                  = 120.0f;
-volatile uint32_t pulseIntervalMicros  = 20833;  // recalculated by updateBPM()
-volatile bool     clockRunning         = false;
-volatile uint32_t internalTickCount    = 0;       // 0–95, wraps at INTERNAL_PPQN
+volatile float    bpm                 = 120.0f;
+volatile uint32_t pulseIntervalMicros = 20833;  // recalculated by updateBPM()
+volatile bool     clockRunning        = false;
+volatile uint32_t internalTickCount   = 0;       // 0–95, wraps at INTERNAL_PPQN
 
-float   speedMultiplier = 1.0f;   // 0.5 / 1.0 / 2.0 depending on toggle switch
+float speedMultiplier = 1.0f;  // 0.5 / 1.0 / 2.0 depending on toggle switch
 
 
 // ============================================================================
 //  GLOBAL STATE — PORTS
 // ============================================================================
 
-// Default configuration: all ports start as CV, quarter-note division,
-// no swing, enabled. Change these defaults to suit your setup.
+// Default configuration for first power-on.
+// Division indices refer to divisionTicks[] above:
+//   0=Whole, 1=Half, 2=Quarter, 3=8th, 4=16th, 5=32nd, 6=MIDI(24), 7=Volca
 PortConfig ports[8] = {
-  {PORT_MIDI, 2, 50, true},   // port 1: MIDI, quarter note
-  {PORT_CV,   2, 50, true},   // port 2: CV,   quarter note
-  {PORT_CV,   3, 50, true},   // port 3: CV,   8th note
-  {PORT_CV,   4, 50, true},   // port 4: CV,   16th note
-  {PORT_CV,   1, 50, true},   // port 5: CV,   half note
-  {PORT_CV,   0, 50, true},   // port 6: CV,   whole note
-  {PORT_CV,   2, 50, true},   // port 7: CV,   quarter note
-  {PORT_CV,   2, 50, true},   // port 8: CV,   quarter note
+  {PORT_MIDI, 2, 50, true},   // port 1: MIDI out, quarter note
+  {PORT_CV,   2, 50, true},   // port 2: CV,  quarter note
+  {PORT_CV,   3, 50, true},   // port 3: CV,  8th note
+  {PORT_CV,   4, 50, true},   // port 4: CV,  16th note
+  {PORT_CV,   1, 50, true},   // port 5: CV,  half note
+  {PORT_CV,   0, 50, true},   // port 6: CV,  whole note
+  {PORT_CV,   2, 50, true},   // port 7: CV,  quarter note
+  {PORT_CV,   2, 50, true},   // port 8: CV,  quarter note
 };
 
-// Per-port tick counters for clock division
-uint8_t  portTickCount[8]   = {0};
+// Per-port tick counters for clock division.
+// FIXED v0.2: uint16_t — must hold up to 384 (whole note ticks).
+// volatile — written by clockISR, read by editCurrentValue in loop().
+volatile uint16_t portTickCount[8] = {0};
 
-// Per-port CV pulse-off times (micros timestamp when pulse should end)
-uint32_t cvPulseOffTime[8]  = {0};
+// Per-port CV pulse-off times (micros timestamp when pulse should end).
+// volatile — written by clockISR and updateCVSwingTriggers, read by updateCVPulseOff.
+volatile uint32_t cvPulseOffTime[8] = {0};
 
-// Per-port MIDI clock division counters
-// (for MIDI ports, we count internal ticks to know when to send a MIDI clock byte)
-uint8_t  midiTickCount[8]   = {0};
+// Per-port swing: 8th-note phase tracker (0 = downbeat, 1 = upbeat).
+// Written and read only in clockISR — no volatile needed, but kept for clarity.
+uint8_t eighthNotePhase[8] = {0};
 
-// Per-port swing: 8th-note phase tracker (0=downbeat, 1=upbeat)
-uint8_t  eighthNotePhase[8] = {0};
+// Pre-computed swing delay per port in microseconds.
+// volatile — written by updateSwingDelays in loop(), read by clockISR.
+volatile uint32_t swingDelayMicros[8] = {0};
 
-// Pre-computed swing delay per port in microseconds
-uint32_t swingDelayMicros[8] = {0};
-
-// Per-port delayed CV pulse trigger times (for swing on upbeats)
-uint32_t cvSwingTriggerTime[8] = {0};
+// Per-port delayed CV pulse trigger times (for swing on upbeats).
+// volatile — written by clockISR, read and cleared by updateCVSwingTriggers in loop().
+volatile uint32_t cvSwingTriggerTime[8] = {0};
 
 
 // ============================================================================
 //  GLOBAL STATE — UI
 // ============================================================================
 
-UILevel   currentLevel  = LEVEL_PORT_SELECT;
-uint8_t   selectedPort  = 0;        // 0–7
-PortParam selectedParam = PARAM_TYPE;
+UILevel   currentLevel       = LEVEL_PORT_SELECT;
+uint8_t   selectedPort       = 0;         // 0–7
+PortParam selectedParam      = PARAM_TYPE;
 bool      displayNeedsUpdate = true;
 
 
@@ -246,28 +321,33 @@ bool      displayNeedsUpdate = true;
 //  GLOBAL STATE — LEDS
 // ============================================================================
 
-uint32_t ledFlashTime[8] = {0};  // millis() timestamp of last pulse per port
+// millis() timestamp of last pulse per port.
+// volatile — written by clockISR and updateCVSwingTriggers, read by updateAllLEDs.
+volatile uint32_t ledFlashTime[8] = {0};
+
 
 // ============================================================================
 //  GLOBAL STATE — START/STOP BUTTON LED
 //
 //  The button contains a bicolour LED (green/red) behind a frosted clear cap.
 //  When running: green channel breathes in a sine curve locked to quarter-note BPM.
-//  When stopped: red channel glows at a steady dim level.
+//  When stopped: red channel holds a steady dim glow.
 //
-//  The breathing uses a quarter-note period derived from pulseIntervalMicros.
-//  We track phase as a 0.0–1.0 float updated each loop() call.
+//  How the sine breathing works:
+//    phase = elapsed time within current beat / quarter-note duration  (0.0–1.0)
+//    brightness = sin(phase × π)  maps 0→0, 0.5→1.0 (peak), 1.0→0
+//    This produces one smooth arch per beat, peaking at the midpoint.
+//    Scaled into BTN_LED_GREEN_MIN … BTN_LED_GREEN_MAX so the LED always
+//    has a faint glow even at the trough of the cycle.
 // ============================================================================
 
-// Phase position within the current quarter-note breath cycle (0.0 = start, 1.0 = end)
-float   btnLedPhase         = 0.0f;
+float    btnLedPhase       = 0.0f;
+uint32_t btnLedCycleStart  = 0;
 
-// micros() timestamp of when the current quarter-note cycle started
-uint32_t btnLedCycleStart   = 0;
-
-// Duration of one quarter-note in microseconds — updated whenever BPM changes
-// (a copy kept here so the LED logic doesn't have to reach into pulseIntervalMicros
-//  and multiply — just read this directly)
+// Duration of one quarter-note in microseconds — updated whenever BPM changes.
+// volatile — written by updateBPM (loop), read by updateButtonLED (loop).
+// Both accesses are in loop() so volatile is not strictly required here,
+// but it documents that pulseIntervalMicros feeds into it indirectly via the ISR.
 volatile uint32_t quarterNoteMicros = 500000;  // default: 120 BPM
 
 
@@ -276,17 +356,17 @@ volatile uint32_t quarterNoteMicros = 500000;  // default: 120 BPM
 // ============================================================================
 
 // Start/Stop button
-bool     btnLastState   = HIGH;
-uint32_t lastPressTime  = 0;
+bool     btnLastState  = HIGH;
+uint32_t lastPressTime = 0;
 
 // Nav encoder button
-bool     navLastState   = HIGH;
-uint32_t navPressTime   = 0;
-bool     navButtonHeld  = false;
+bool     navLastState  = HIGH;
+uint32_t navPressTime  = 0;
+bool     navButtonHeld = false;
 
 // Tap tempo
-uint32_t tapTimes[4]    = {0};
-uint8_t  tapIndex       = 0;
+uint32_t tapTimes[4] = {0};
+uint8_t  tapIndex    = 0;
 
 
 // ============================================================================
@@ -295,8 +375,8 @@ uint8_t  tapIndex       = 0;
 
 IntervalTimer clockTimer;
 
-Encoder tempoEncoder(14, 15);   // Encoder 1: Tempo
-Encoder navEncoder(18, 19);     // Encoder 2: Port config navigation
+Encoder tempoEncoder(14, 15);  // Encoder 1: Tempo
+Encoder navEncoder(18, 19);    // Encoder 2: Port config navigation
 
 long lastTempoEncoderPos = 0;
 long lastNavEncoderPos   = 0;
@@ -316,27 +396,30 @@ HardwareSerial* midiPorts[8] = {
 //  CLOCK CALCULATIONS
 // ============================================================================
 
-// Call whenever BPM or speedMultiplier changes
+// Call whenever BPM or speedMultiplier changes.
 void updateBPM(float newBPM) {
   bpm = constrain(newBPM, 20.0f, 300.0f);
-  // Internal tick interval in microseconds
-  // = 60,000,000 µs/min  ÷  (BPM × speedMultiplier × INTERNAL_PPQN)
+  // Internal tick interval:
+  //   60,000,000 µs/min  ÷  (BPM × speedMultiplier × INTERNAL_PPQN)
   pulseIntervalMicros = (uint32_t)(60000000.0f /
                         (bpm * speedMultiplier * (float)INTERNAL_PPQN));
-  // Quarter-note duration for button LED breathing cycle
-  // = 60,000,000 µs/min  ÷  (BPM × speedMultiplier)
+  // Quarter-note duration for the button LED breathing cycle:
+  //   60,000,000 µs/min  ÷  (BPM × speedMultiplier)
   quarterNoteMicros = (uint32_t)(60000000.0f / (bpm * speedMultiplier));
 }
 
-// Recompute swing delay for every port
-// Call after any BPM change or after editing a port's swing value
+// Recompute swing delay for every port.
+// Call after any BPM change or after editing a port's swing value.
 void updateSwingDelays() {
-  // Duration of one 8th note in microseconds at current tempo
-  uint32_t eighthNoteMicros = pulseIntervalMicros * (INTERNAL_PPQN / 8);
+  // Duration of one 8th note in microseconds at current tempo.
+  // One 8th note = half a quarter note = INTERNAL_PPQN/2 ticks.
+  // FIXED v0.2: was (INTERNAL_PPQN / 8) = 12 ticks, which is a 32nd note —
+  // 4× too short, making swing nearly inaudible. Correct divisor is 2.
+  uint32_t eighthNoteMicros = pulseIntervalMicros * (INTERNAL_PPQN / 2);  // × 48
   for (int i = 0; i < 8; i++) {
-    // swingPercent 50 = straight (0 delay on upbeat)
-    // swingPercent 75 = strong swing (delay = 25% of 8th note duration)
-    // swingPercent 90 = very heavy swing
+    // swing 50% = straight (0 delay)
+    // swing 67% = moderate swing (upbeat delayed by ~33% of an 8th note)
+    // swing 90% = very heavy swing
     float swingFrac = (ports[i].swing - 50) / 100.0f;  // 0.0 – 0.4
     swingDelayMicros[i] = (uint32_t)(eighthNoteMicros * swingFrac * 2.0f);
   }
@@ -353,14 +436,14 @@ void initMIDIPorts() {
   }
 }
 
-// Send a byte to a single MIDI port (only if it's configured as MIDI and enabled)
+// Send a byte to a single port (only if configured as MIDI and enabled).
 inline void sendMIDI(uint8_t portIndex, uint8_t msg) {
   if (ports[portIndex].enabled && ports[portIndex].type == PORT_MIDI) {
     midiPorts[portIndex]->write(msg);
   }
 }
 
-// Send a byte to ALL enabled MIDI ports (used for START/STOP/CONTINUE)
+// Send a byte to ALL enabled MIDI ports (used for START/STOP/CONTINUE).
 void sendToAllMIDIPorts(uint8_t msg) {
   for (int i = 0; i < 8; i++) {
     sendMIDI(i, msg);
@@ -379,7 +462,7 @@ void initCVPins() {
   }
 }
 
-// Called from main loop — turns off any CV pulses whose time has elapsed
+// Called from main loop — turns off any CV pulses whose time has elapsed.
 void updateCVPulseOff() {
   uint32_t now = micros();
   for (int i = 0; i < 8; i++) {
@@ -390,7 +473,7 @@ void updateCVPulseOff() {
   }
 }
 
-// Called from main loop — fires any CV pulses that have been swing-delayed
+// Called from main loop — fires any CV pulses that have been swing-delayed.
 void updateCVSwingTriggers() {
   uint32_t now = micros();
   for (int i = 0; i < 8; i++) {
@@ -411,6 +494,10 @@ void updateCVSwingTriggers() {
 //
 //  KEEP THIS FAST. No Serial.print, no floating point, no display updates.
 //  Record timestamps here; do slow work in loop().
+//
+//  Priority set to 0 (highest on Teensy 4.1) in startClock() / resyncClock().
+//  This ensures the timer cannot be delayed by UART, I2C, NeoPixel, or any
+//  other peripheral interrupt — timing accuracy is the whole point.
 // ============================================================================
 
 void FASTRUN clockISR() {
@@ -428,25 +515,24 @@ void FASTRUN clockISR() {
     if (shouldFire) {
       portTickCount[i] = 0;
 
-      // Determine if this is an upbeat (odd 8th note) for swing
+      // Swing: alternate downbeat / upbeat on each successive firing.
+      // Swing delay is only applied to upbeats (eighthNotePhase == 1).
       bool isUpbeat = (eighthNotePhase[i] == 1);
-
-      // Toggle 8th note phase
-      // An 8th note = INTERNAL_PPQN/8 = 12 ticks at 96 PPQN
-      // We track this separately per port based on their own division firing
       eighthNotePhase[i] ^= 1;
 
       if (ports[i].type == PORT_MIDI) {
-        // Send MIDI clock byte immediately
+        // Send MIDI clock byte immediately via hardware UART.
         midiPorts[i]->write(MIDI_CLOCK);
-        ledFlashTime[i] = millis();  // schedule LED flash (millis safe in ISR on Teensy)
+        // millis() is safe here on Teensy 4.1 but may be ~1ms stale at
+        // high ISR priority. Imperceptible for LED flash purposes.
+        ledFlashTime[i] = millis();
 
       } else {
         // CV output
         if (isUpbeat && swingDelayMicros[i] > 0) {
-          // Delay this upbeat pulse for swing effect
+          // Schedule this upbeat pulse to fire after the swing delay.
+          // updateCVSwingTriggers() in loop() will watch for it.
           cvSwingTriggerTime[i] = now + swingDelayMicros[i];
-          // LED will flash when the delayed trigger fires
         } else {
           // Fire immediately
           digitalWriteFast(CV_PINS[i], HIGH);
@@ -457,7 +543,7 @@ void FASTRUN clockISR() {
     }
   }
 
-  // Advance global tick counter
+  // Advance global tick counter (used for future features; not driving outputs directly)
   internalTickCount = (internalTickCount + 1) % INTERNAL_PPQN;
 }
 
@@ -469,11 +555,10 @@ void FASTRUN clockISR() {
 void startClock() {
   if (clockRunning) return;
 
-  // Reset all counters for a clean start from beat 1
+  // Reset all per-port counters for a clean start from beat 1.
   internalTickCount = 0;
   for (int i = 0; i < 8; i++) {
     portTickCount[i]      = 0;
-    midiTickCount[i]      = 0;
     eighthNotePhase[i]    = 0;
     cvSwingTriggerTime[i] = 0;
     cvPulseOffTime[i]     = 0;
@@ -482,6 +567,10 @@ void startClock() {
   clockRunning = true;
   sendToAllMIDIPorts(MIDI_START);
   clockTimer.begin(clockISR, pulseIntervalMicros);
+  // FIXED v0.2: Explicitly set highest interrupt priority.
+  // Without this, Teensyduino's default IntervalTimer priority may allow
+  // UART or other ISRs to delay the clock, introducing jitter.
+  clockTimer.priority(0);
 
   displayNeedsUpdate = true;
 }
@@ -493,7 +582,7 @@ void stopClock() {
   clockTimer.end();
   sendToAllMIDIPorts(MIDI_STOP);
 
-  // Kill all CV outputs immediately
+  // Kill all CV outputs immediately.
   for (int i = 0; i < 8; i++) {
     digitalWriteFast(CV_PINS[i], LOW);
     cvPulseOffTime[i]     = 0;
@@ -504,18 +593,20 @@ void stopClock() {
 }
 
 void resyncClock() {
-  // Atomically restart the clock from beat 1 without sending STOP/START
+  // Restart the clock from beat 1 without sending STOP/START.
+  // Used for tight re-alignment mid-session (double-press of start/stop button).
   clockTimer.end();
 
   internalTickCount = 0;
   for (int i = 0; i < 8; i++) {
     portTickCount[i]      = 0;
-    midiTickCount[i]      = 0;
     eighthNotePhase[i]    = 0;
     cvSwingTriggerTime[i] = 0;
   }
 
   clockTimer.begin(clockISR, pulseIntervalMicros);
+  // FIXED v0.2: Re-apply priority after re-arming the timer.
+  clockTimer.priority(0);
   sendToAllMIDIPorts(MIDI_CONTINUE);
 
   displayNeedsUpdate = true;
@@ -534,14 +625,14 @@ void handleTempoEncoder() {
     int steps = delta / 4;
     lastTempoEncoderPos = pos;
 
-    // Hold the nav encoder button while turning tempo encoder for coarse adjust
-    // (5 BPM per step instead of 0.5 BPM)
+    // Hold nav encoder button while turning tempo encoder for coarse adjust:
+    // 5 BPM per step instead of 0.5 BPM.
     float increment = (digitalRead(NAV_BTN_PIN) == LOW) ? 5.0f : 0.5f;
     updateBPM(bpm + (steps * increment));
     updateSwingDelays();
 
     if (clockRunning) {
-      clockTimer.update(pulseIntervalMicros);  // update without restarting
+      clockTimer.update(pulseIntervalMicros);  // adjust rate without restarting
     }
 
     displayNeedsUpdate = true;
@@ -553,31 +644,44 @@ void handleTempoEncoder() {
 //  ENCODER 2 — PORT CONFIG NAVIGATION
 // ============================================================================
 
-// Edit the currently selected parameter value by `steps` steps
+// Apply one or more encoder steps to the currently selected parameter value.
 void editCurrentValue(int steps) {
   PortConfig& p = ports[selectedPort];
 
   switch (selectedParam) {
 
-    case PARAM_TYPE:
-      // Toggle between MIDI and CV
+    case PARAM_TYPE: {
+      // Toggle between MIDI and CV.
+      // FIXED v0.2: If the clock is running, pause it before changing port type.
+      // Switching a UART mid-transmission (or reconfiguring a CV pin while the
+      // ISR might be writing to it) can cause a crash. In practice users set
+      // port types during setup, not mid-performance — a brief pause is fine.
+      bool wasRunning = clockRunning;
+      if (wasRunning) stopClock();
+
       p.type = (p.type == PORT_MIDI) ? PORT_CV : PORT_MIDI;
 
       if (p.type == PORT_MIDI) {
-        // Switching TO MIDI: set up UART, disable CV pin
+        // Switching TO MIDI: reinitialise UART, stop driving the CV pin.
         midiPorts[selectedPort]->begin(31250);
         digitalWriteFast(CV_PINS[selectedPort], LOW);
-        pinMode(CV_PINS[selectedPort], INPUT);  // stop driving the pin
+        pinMode(CV_PINS[selectedPort], INPUT);  // release the pin
       } else {
-        // Switching TO CV: set pin as output
+        // Switching TO CV: set pin as output, ensure it starts LOW.
         pinMode(CV_PINS[selectedPort], OUTPUT);
         digitalWriteFast(CV_PINS[selectedPort], LOW);
       }
+
+      // Reset this port's tick counter so the new type takes effect cleanly.
+      portTickCount[selectedPort] = 0;
+
+      if (wasRunning) startClock();
       break;
+    }
 
     case PARAM_DIVISION:
       p.division = (uint8_t)constrain((int)p.division + steps, 0, NUM_DIVISIONS - 1);
-      // Reset tick counter so new division takes effect cleanly
+      // Reset tick counter so new division takes effect at next beat boundary.
       portTickCount[selectedPort] = 0;
       break;
 
@@ -628,24 +732,24 @@ void handleNavButton() {
   bool pressed = (digitalRead(NAV_BTN_PIN) == LOW);
   uint32_t now = millis();
 
-  // Button just pressed — record time
+  // Button just pressed — record time.
   if (pressed && !navButtonHeld) {
-    navPressTime   = now;
-    navButtonHeld  = true;
-    navLastState   = LOW;
+    navPressTime  = now;
+    navButtonHeld = true;
+    navLastState  = LOW;
   }
 
-  // Button just released
+  // Button just released — determine short vs long press.
   if (!pressed && navButtonHeld) {
     uint32_t heldFor = now - navPressTime;
     navButtonHeld    = false;
     navLastState     = HIGH;
 
     if (heldFor >= LONG_PRESS_MS) {
-      // Long press — return to top level from anywhere
+      // Long press — escape back to top level from anywhere.
       currentLevel = LEVEL_PORT_SELECT;
     } else {
-      // Short press — advance deeper or confirm
+      // Short press — advance deeper into the menu hierarchy.
       switch (currentLevel) {
         case LEVEL_PORT_SELECT:
           currentLevel  = LEVEL_PARAM_SELECT;
@@ -657,7 +761,7 @@ void handleNavButton() {
           break;
 
         case LEVEL_VALUE_EDIT:
-          // Confirm current value and step back up to param list
+          // Confirm current value and return to parameter list.
           currentLevel = LEVEL_PARAM_SELECT;
           break;
       }
@@ -678,10 +782,10 @@ void handleStartStopButton() {
 
   if (state == LOW && btnLastState == HIGH) {  // falling edge = press
     if (now - lastPressTime < DOUBLE_PRESS_MS) {
-      // Double press = RESYNC
+      // Double press = RESYNC (re-align to beat 1 without stopping)
       if (clockRunning) resyncClock();
     } else {
-      // Single press = toggle start/stop
+      // Single press = toggle start / stop
       if (clockRunning) stopClock();
       else              startClock();
     }
@@ -699,34 +803,27 @@ void handleStartStopButton() {
 //
 //  When RUNNING:
 //    Green channel breathes in a sine curve over one quarter-note period.
-//    The sine wave gives an organic "lung-like" feel — slow fade in,
-//    peak at the beat, slow fade out — rather than a mechanical linear ramp.
-//    Red channel is off.
+//    The sine wave gives an organic feel — slow fade in, peak at the beat
+//    midpoint, slow fade out — rather than a mechanical linear ramp.
+//    Red channel is fully off.
 //
 //  When STOPPED:
 //    Red channel holds a steady dim glow (BTN_LED_RED_IDLE).
 //    Green channel is off.
-//
-//  How the sine breathing works:
-//    phase = elapsed time within current beat / quarter-note duration  (0.0–1.0)
-//    brightness = sin(phase × π)  maps 0→0, 0.5→1.0 (peak), 1.0→0
-//    This produces one smooth arch per beat, peaking at the midpoint.
-//    We then scale into the BTN_LED_GREEN_MIN … BTN_LED_GREEN_MAX range
-//    so the LED never fully extinguishes (always a faint glow is visible).
 // ============================================================================
 
 void updateButtonLED() {
   if (clockRunning) {
-    // ── Advance phase within the current quarter-note cycle ──────────────────
     uint32_t now     = micros();
     uint32_t elapsed = now - btnLedCycleStart;
 
-    // If we've passed the end of this beat, roll over to the next cycle.
-    // This naturally re-locks to tempo even if loop() is occasionally slow.
+    // Roll over to next beat cycle if we've passed the end of this one.
+    // Advancing by exactly quarterNoteMicros (rather than resetting to now)
+    // keeps the breathing locked to tempo even if loop() occasionally runs slow.
     if (elapsed >= quarterNoteMicros) {
-      btnLedCycleStart += quarterNoteMicros;   // advance by exactly one beat
-      elapsed = now - btnLedCycleStart;         // recalculate with rolled-over start
-      // Guard against multiple missed beats (e.g. after pause in loop)
+      btnLedCycleStart += quarterNoteMicros;
+      elapsed = now - btnLedCycleStart;
+      // Guard against multiple missed beats (e.g. after a long OLED redraw).
       if (elapsed >= quarterNoteMicros) {
         btnLedCycleStart = now;
         elapsed = 0;
@@ -736,31 +833,33 @@ void updateButtonLED() {
     // Phase 0.0 (beat start) → 1.0 (beat end)
     btnLedPhase = (float)elapsed / (float)quarterNoteMicros;
 
-    // ── Sine curve: arch from 0 → 1 → 0 over one beat ────────────────────────
-    // sin(0) = 0, sin(π/2) = 1, sin(π) = 0
-    float sinVal = sinf(btnLedPhase * 3.14159265f);  // 0.0 – 1.0
+    // sin(0) = 0, sin(π/2) = 1, sin(π) = 0 → one smooth arch per beat
+    float sinVal = sinf(btnLedPhase * 3.14159265f);
 
-    // ── Scale to desired brightness range ────────────────────────────────────
     uint8_t brightness = (uint8_t)(
       BTN_LED_GREEN_MIN + sinVal * (BTN_LED_GREEN_MAX - BTN_LED_GREEN_MIN)
     );
 
     analogWrite(BTN_LED_GREEN, brightness);
-    analogWrite(BTN_LED_RED,   0);           // red fully off when running
+    analogWrite(BTN_LED_RED,   0);
 
   } else {
-    // ── Stopped: steady dim red, green off ───────────────────────────────────
+    // Stopped: steady dim red, green off.
     analogWrite(BTN_LED_GREEN, 0);
     analogWrite(BTN_LED_RED,   BTN_LED_RED_IDLE);
 
-    // Reset cycle start so breathing begins cleanly on next startClock()
+    // Reset so breathing starts cleanly from the beginning on next startClock().
     btnLedCycleStart = micros();
     btnLedPhase      = 0.0f;
   }
 }
-//  Connect a dedicated tap button and call this from loop() when it's pressed.
+
+
+// ============================================================================
+//  TAP TEMPO
+//  Connect a dedicated tap button and call this from loop() when it is pressed.
 //  Averages the last 3 tap intervals for stability.
-//  (Optional — wire to a second button or use a long-press on start/stop button)
+//  (Optional — wire to a second button or use a long-press on the start/stop button)
 // ============================================================================
 
 void handleTapTempo() {
@@ -786,7 +885,7 @@ void handleTapTempo() {
 // ============================================================================
 //  SPEED MULTIPLIER SWITCH
 //  3-position toggle: HALF — NORMAL — DOUBLE
-//  Wire centre pin to GND; two outer pins to SW_HALF and SW_DOUBLE with INPUT_PULLUP
+//  Wire centre pin to GND; two outer pins to SW_HALF and SW_DOUBLE with INPUT_PULLUP.
 // ============================================================================
 
 void handleSpeedSwitch() {
@@ -797,7 +896,7 @@ void handleSpeedSwitch() {
 
   if (newMult != speedMultiplier) {
     speedMultiplier = newMult;
-    updateBPM(bpm);  // recalculates pulseIntervalMicros with new multiplier
+    updateBPM(bpm);  // recalculates pulseIntervalMicros and quarterNoteMicros
     updateSwingDelays();
     if (clockRunning) clockTimer.update(pulseIntervalMicros);
     displayNeedsUpdate = true;
@@ -809,6 +908,7 @@ void handleSpeedSwitch() {
 //  LED UPDATES
 //  Call from loop() — NOT from ISR.
 //  leds.show() takes ~300µs and must not be called inside the timer interrupt.
+//  Each port's LED blinks at its own rate, matching that port's clock division.
 // ============================================================================
 
 void updateAllLEDs() {
@@ -819,19 +919,16 @@ void updateAllLEDs() {
     uint32_t color;
 
     if (!ports[i].enabled) {
-      // Port disabled — off
-      color = leds.Color(0, 0, 0);
+      color = leds.Color(0, 0, 0);  // off when port is disabled
 
     } else if (now - ledFlashTime[i] < LED_FLASH_DURATION) {
-      // Recently pulsed — bright white flash
-      color = leds.Color(255, 255, 255);
+      color = leds.Color(255, 255, 255);  // bright white flash on pulse
 
     } else {
-      // Idle glow — blue for MIDI, green for CV
-      if (ports[i].type == PORT_MIDI)
-        color = leds.Color(0, 0, 40);   // dim blue
-      else
-        color = leds.Color(0, 40, 0);   // dim green
+      // Idle glow: blue = MIDI port, green = CV port
+      color = (ports[i].type == PORT_MIDI)
+              ? leds.Color(0, 0, 40)   // dim blue
+              : leds.Color(0, 40, 0);  // dim green
     }
 
     if (leds.getPixelColor(i) != color) {
@@ -874,30 +971,28 @@ void updateDisplay() {
     display.print("--- STOPPED");
   }
 
-  // Speed multiplier indicator
-  if (speedMultiplier == 0.5f)     display.print(" x0.5");
+  // Speed multiplier indicator (only shown when not at 1×)
+  if (speedMultiplier == 0.5f)      display.print(" x0.5");
   else if (speedMultiplier == 2.0f) display.print(" x2");
 
-  display.drawLine(0, 27, 127, 27, SSD1306_WHITE);  // separator
+  display.drawLine(0, 27, 127, 27, SSD1306_WHITE);  // separator line
 
   // ── Level-specific content ─────────────────────────────────────────────────
 
   if (currentLevel == LEVEL_PORT_SELECT) {
-    // Show all 8 ports as abbreviated summary: "1:MI" or "1:CV"
+    // Compact overview: 4 ports per row, 2 rows
     display.setTextSize(1);
     for (int i = 0; i < 8; i++) {
-      int col = (i % 4) * 32;   // 4 ports per row, 32px wide each
+      int col = (i % 4) * 32;
       int row = (i / 4) * 10 + 30;
       display.setCursor(col, row);
-      // Highlight selected port with an arrow
-      if (i == selectedPort) display.print(">");
-      else                   display.print(" ");
+      display.print(i == selectedPort ? ">" : " ");
       display.print(i + 1);
       display.print(":");
       display.print(ports[i].type == PORT_MIDI ? "MI" : "CV");
     }
 
-    // Show selected port's division at bottom
+    // Selected port detail at bottom
     display.setCursor(0, 54);
     display.print("P");
     display.print(selectedPort + 1);
@@ -908,7 +1003,6 @@ void updateDisplay() {
     display.print("%");
 
   } else if (currentLevel == LEVEL_PARAM_SELECT) {
-    // Show parameter list for selected port
     display.setTextSize(1);
     display.setCursor(0, 29);
     display.print("PORT ");
@@ -920,7 +1014,7 @@ void updateDisplay() {
 
     for (int i = 0; i < PARAM_COUNT; i++) {
       display.setCursor(0, 38 + i * 8);
-      display.print(i == selectedParam ? "> " : "  ");
+      display.print(i == (int)selectedParam ? "> " : "  ");
       display.print(paramNames[i]);
       display.print(": ");
 
@@ -942,7 +1036,6 @@ void updateDisplay() {
     }
 
   } else if (currentLevel == LEVEL_VALUE_EDIT) {
-    // Show single-parameter edit view
     display.setTextSize(1);
     display.setCursor(0, 29);
     display.print("PORT ");
@@ -952,7 +1045,7 @@ void updateDisplay() {
     display.print(" - ");
     display.print(paramNames[selectedParam]);
 
-    // Show current value large and centred
+    // Show current value large, centred, with < > arrows
     display.setTextSize(2);
     display.setCursor(10, 42);
     display.print("< ");
@@ -1002,7 +1095,7 @@ void setup() {
   pinMode(BTN_LED_GREEN, OUTPUT);
   pinMode(BTN_LED_RED,   OUTPUT);
   analogWrite(BTN_LED_GREEN, 0);
-  analogWrite(BTN_LED_RED,   BTN_LED_RED_IDLE);  // start showing stopped state
+  analogWrite(BTN_LED_RED,   BTN_LED_RED_IDLE);  // start in stopped state
   btnLedCycleStart = micros();
 
   // Calculate initial timing values
@@ -1011,30 +1104,29 @@ void setup() {
 
   // Initialise NeoPixel LEDs
   leds.begin();
-  leds.setBrightness(80);  // 0-255, don't run at full brightness
+  leds.setBrightness(80);  // 0–255; don't run at full brightness
   leds.clear();
   leds.show();
 
   // Initialise OLED display
-  // If display.begin() fails, the sketch continues but the screen stays blank
+  // If display.begin() fails, the sketch continues — LEDs and MIDI still work.
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    // Display not found — continue anyway, LEDs and MIDI still work
+    // Display not found — continue without it
   }
   display.clearDisplay();
   display.display();
-
-  // Draw initial display
   updateDisplay();
 
-  // Brief startup LED sequence — all lights white then settle to idle colour
+  // Brief startup LED sequence: all white, then settle to idle colours
   for (int i = 0; i < 8; i++) {
     leds.setPixelColor(i, leds.Color(255, 255, 255));
   }
   leds.show();
   delay(300);
   for (int i = 0; i < 8; i++) {
-    leds.setPixelColor(i, ports[i].type == PORT_MIDI ?
-                       leds.Color(0, 0, 40) : leds.Color(0, 40, 0));
+    leds.setPixelColor(i, ports[i].type == PORT_MIDI
+                          ? leds.Color(0, 0, 40)
+                          : leds.Color(0, 40, 0));
   }
   leds.show();
 }
@@ -1044,8 +1136,8 @@ void setup() {
 //  MAIN LOOP
 //
 //  Keep everything here non-blocking (no delay() calls).
-//  The clock ISR fires independently via hardware timer.
-//  This loop handles UI, LEDs, and CV pulse management.
+//  The clock ISR fires independently via hardware timer at highest priority.
+//  This loop handles UI, LEDs, and CV pulse timing.
 // ============================================================================
 
 void loop() {
@@ -1056,11 +1148,11 @@ void loop() {
   handleSpeedSwitch();       // Half / Normal / Double speed toggle
   updateCVPulseOff();        // Turn off CV pulses whose time has elapsed
   updateCVSwingTriggers();   // Fire any swing-delayed CV pulses
-  updateAllLEDs();           // Update NeoPixel LEDs (per-port, independent rhythm)
-  updateButtonLED();         // Breathe Start/Stop button LED to BPM (green=running, red=stopped)
+  updateAllLEDs();           // Update NeoPixel LEDs (each port at its own rate)
+  updateButtonLED();         // Breathe start/stop button LED in sync with BPM
 
   if (displayNeedsUpdate) {
-    updateDisplay();         // Refresh OLED only when something changed
+    updateDisplay();         // Refresh OLED only when something has changed
   }
 }
 
@@ -1068,7 +1160,7 @@ void loop() {
 // ============================================================================
 //  END OF CLOCKTOPUS SKETCH
 //
-//  Next steps:
+//  First-time upload steps:
 //    1. Install Teensyduino from pjrc.com
 //    2. Open this file in Arduino IDE
 //    3. Tools > Board > Teensyduino > Teensy 4.1
@@ -1078,6 +1170,6 @@ void loop() {
 //  Suggested first test (no hardware needed beyond Teensy + USB):
 //    - Upload sketch
 //    - Open a DAW or MIDI monitor app on your computer
-//    - Press start button — you should see MIDI clock messages arriving
-//      on USB MIDI at your set BPM
+//    - Press the start button — MIDI clock messages should arrive on
+//      USB MIDI at the set BPM
 // ============================================================================
