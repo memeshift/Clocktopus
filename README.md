@@ -9,7 +9,7 @@ At the heart of Clocktopus lies a precise, high-resolution clock timer that send
 
 Finally, with it's open-source firmware, you can fine-tune Clocktopus's existing features or add entirely new ones: think tempo-synced, CV LFO output or odd time signatures per port. Or perhaps you'd want to add a different clock or polyrhythmic system based on West African djembe cycles, Indian tala systems, or Indonesian gamelan. Musical curiousity is encouraged.
 
-Clocktopus soothes the stress of syncing your gear, allowing you to relinquish yourself to the musical pulse of the moment.
+Clocktopus soothes the stress of syncing your gear so you can play with other people more easily.
 
 
 # Clocktopus — Feature List
