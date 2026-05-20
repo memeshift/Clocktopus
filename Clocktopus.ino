@@ -356,8 +356,9 @@ volatile uint32_t quarterNoteMicros = 500000;  // default: 120 BPM
 // ============================================================================
 
 // Start/Stop button
-bool     btnLastState  = HIGH;
-uint32_t lastPressTime = 0;
+bool     btnLastState      = HIGH;
+uint32_t lastPressTime     = 0;
+bool     btnPendingSingle  = false;  // single-press deferred until double-press window expires
 
 // Nav encoder button
 bool     navLastState  = HIGH;
@@ -781,15 +782,22 @@ void handleStartStopButton() {
   uint32_t now = millis();
 
   if (state == LOW && btnLastState == HIGH) {  // falling edge = press
-    if (now - lastPressTime < DOUBLE_PRESS_MS) {
-      // Double press = RESYNC (re-align to beat 1 without stopping)
+    if (btnPendingSingle && (now - lastPressTime < DOUBLE_PRESS_MS)) {
+      // Second press within window — cancel the pending single-press and resync.
+      btnPendingSingle = false;
       if (clockRunning) resyncClock();
     } else {
-      // Single press = toggle start / stop
-      if (clockRunning) stopClock();
-      else              startClock();
+      // First press — defer action until the double-press window expires.
+      btnPendingSingle = true;
     }
     lastPressTime = now;
+  }
+
+  // Single-press window expired: now safe to act on it as a plain toggle.
+  if (btnPendingSingle && (now - lastPressTime >= DOUBLE_PRESS_MS)) {
+    btnPendingSingle = false;
+    if (clockRunning) stopClock();
+    else              startClock();
   }
 
   btnLastState = state;
@@ -869,8 +877,10 @@ void handleTapTempo() {
 
   if (tapIndex >= 4) {
     uint32_t totalInterval = 0;
-    for (int i = 1; i < 4; i++) {
-      totalInterval += tapTimes[i] - tapTimes[i - 1];
+    for (int i = 0; i < 3; i++) {
+      uint8_t older = (tapIndex - 4 + i) % 4;
+      uint8_t newer = (tapIndex - 3 + i) % 4;
+      totalInterval += tapTimes[newer] - tapTimes[older];
     }
     float avgInterval = totalInterval / 3.0f;
     float newBPM      = 60000.0f / avgInterval;
