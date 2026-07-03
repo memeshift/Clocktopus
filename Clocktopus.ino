@@ -5,13 +5,15 @@
 //
 //  Hardware:
 //    - 8x MIDI outputs via hardware UARTs (Serial1–Serial8)
+//    - USB MIDI clock output (24 PPQN + Start/Stop/Continue) for DAW sync
+//      (requires Tools > USB Type > Serial + MIDI)
 //    - 8x Eurorack CV outputs via GPIO + 74AHCT125 level shifter
 //    - 8x WS2812B NeoPixel LEDs (one per port)
 //    - Encoder 1 (pins 14,15) — Tempo (non-detented / smooth)
-//    - Encoder 2 (pins 18,19) — Port config navigation (detented with push button)
+//    - Encoder 2 (pins 16,17) — Port config navigation (detented with push button)
 //    - Nav encoder button (pin 23)
 //    - Start/Stop button (pin 20)
-//    - Start/Stop button bicolour LED: green (pin 25, PWM), red (pin 26, PWM)
+//    - Start/Stop button bicolour LED: green (pin 25, PWM), red (pin 28, PWM)
 //      Frosted clear button cap. Green breathes to BPM when running.
 //      Red glows dim steady when stopped.
 //    - Speed switch HALF (pin 21), DOUBLE (pin 22)
@@ -28,6 +30,91 @@
 
 // ============================================================================
 //  CHANGELOG
+//
+//  v0.4  — 2026-07-03
+//    ADDED   Per-port time shift: ±50ms in 0.5ms steps (5ms steps with the
+//            encoder button held). Shift is always computed as an offset
+//            from the master grid — never by adjusting a port's tick
+//            counter — so setting it back to 0 returns the port EXACTLY
+//            to the grid, guaranteed. Long-press while editing Shift snaps
+//            it to 0. Ports with a nonzero shift show a "*" marker on the
+//            overview screen. Shifts survive resync (they are configuration,
+//            not drift). Applied shift wraps modulo the port's pulse period
+//            (shifting a periodic signal by a full period is identity), which
+//            also guarantees at most one pending pulse per port.
+//            Scheduled (shifted or swung) pulses fire from loop(), so their
+//            jitter equals loop latency: microseconds typically, up to ~6ms
+//            during an OLED redraw. A future hardware-timer scheduler can
+//            remove that; on-grid (shift 0, no swing) pulses keep ISR timing.
+//
+//    RENAMED cvSwingTriggerTime[] → pulseTriggerTime[] and
+//            updateCVSwingTriggers() → updateScheduledPulses(): the delayed-
+//            pulse mechanism now serves time shift on both port types, not
+//            just CV swing.
+//
+//    FIXED   Holding the nav encoder button as a coarse-adjust modifier no
+//            longer triggers a menu navigation when released. (Pre-existing
+//            bug: coarse tempo adjust always navigated the menu as a side
+//            effect.)
+//
+//    UI      Parameter list is now a 3-row window that scrolls with the
+//            selection (5 parameters no longer fit on the 64px display).
+//
+//    UI      Swing now shows as LOCKED on MIDI ports (matching the Division
+//            lock) and cannot be edited there. Swing has only ever affected
+//            CV pulses; the editable arrows on MIDI ports were misleading.
+//            Swinging a MIDI clock stream requires unevenly-spaced ticks
+//            (a per-port event queue) — a candidate for a future clock
+//            engine, not supported by the current one-pending-pulse design.
+//
+//  v0.3  — 2026-07-03
+//    FIXED   Nav encoder moved from pins 18,19 to 16,17. Pins 18/19 are
+//            SDA/SCL for the Wire I2C bus on Teensy 4.1, which the OLED
+//            uses — the encoder would have corrupted display communication.
+//            (Fix ported from Clocktopus_v3.ino, along with the full-build
+//            pin expansion notes in the PIN DEFINITIONS section.)
+//
+//    FIXED   micros() wraparound bug in updateCVPulseOff() and
+//            updateCVSwingTriggers(). Plain `now >= target` comparisons fail
+//            when micros() wraps (~every 71.6 min), which could leave a CV
+//            pin stuck HIGH for over an hour mid-performance. Replaced with
+//            the signed-difference idiom `(int32_t)(now - target) >= 0`.
+//
+//    FIXED   Blocking UART write in clockISR could deadlock: write() waits
+//            for the UART interrupt when the TX buffer is full, but at ISR
+//            priority 0 that interrupt can never run. Now guarded with
+//            availableForWrite() — drops a byte instead of freezing.
+//
+//    FIXED   Red button LED moved from pin 26 to pin 28. Pin 26 has no PWM
+//            on Teensy 4.1; analogWrite(26, 40) would write digital LOW and
+//            the red "stopped" glow would never appear.
+//
+//    FIXED   Race in updateCVSwingTriggers(): between reading a trigger time
+//            and clearing it, the ISR could schedule a new trigger which the
+//            clear would erase (dropped pulse). Now compare-and-clear inside
+//            a brief noInterrupts() section.
+//
+//    FIXED   resyncClock() now sends MIDI CONTINUE before re-arming the
+//            timer, so the main-loop UART writes cannot race the ISR's.
+//
+//    FIXED   MIDI ports locked to the MIDI(24) division. Port 1's factory
+//            default was "Quarter", which sends 1 clock/beat instead of 24 —
+//            a receiver at 120 BPM would derive 5 BPM. Default corrected to
+//            MIDI(24); switching any port to MIDI now forces MIDI(24); the
+//            division parameter is read-only while a port's type is MIDI.
+//            (Deliberate slow-clock tricks are sacrificed for a device that
+//            syncs correctly out of the box.)
+//
+//    ADDED   USB MIDI clock output. The device now sends standard 24 PPQN
+//            MIDI clock plus Start/Stop/Continue over USB, so a DAW can
+//            sync to Clocktopus as an external clock source. The ISR only
+//            counts pending ticks (usbMIDI.sendRealTime() can busy-wait on
+//            a frozen millis() inside a priority-0 ISR — deadlock risk);
+//            loop() drains the count to USB. USB clock jitter therefore
+//            equals loop latency (µs typically, ~6ms worst case during an
+//            OLED redraw) — fine for DAWs, which smooth incoming clock.
+//            Divisions and swing do not apply to USB: DAWs expect the raw
+//            24 PPQN stream and subdivide internally.
 //
 //  v0.2  — 2026-04-04
 //    FIXED   Division table tick values were 4× too small. The internal clock
@@ -117,12 +204,32 @@ const uint8_t LED_COUNT = 8;
 // Uses a bicolour (common-cathode) LED inserted into a frosted clear button cap.
 // Green = clock running (breathing to BPM), Red = clock stopped (steady dim).
 // Both pins must support analogWrite() / PWM on Teensy 4.1.
+// NOTE: pin 26 is NOT PWM-capable on Teensy 4.1 — analogWrite() on it degrades
+// to digital (values < 128 write LOW), so the dim red idle glow (40) would
+// never light. Pin 28 is PWM-capable. Verify against the PJRC pinout card.
 const uint8_t BTN_LED_GREEN = 25;   // PWM pin — green LED anode
-const uint8_t BTN_LED_RED   = 26;   // PWM pin — red LED anode
+const uint8_t BTN_LED_RED   = 28;   // PWM pin — red LED anode (was 26 — not PWM)
 
 // Encoder pins (must be interrupt-capable pins on Teensy 4.1)
 // Encoder 1: Tempo  — pins 14, 15
-// Encoder 2: Nav    — pins 18, 19
+// Encoder 2: Nav    — pins 16, 17  (NOT 18,19 — those are SDA/SCL for the OLED's I2C bus)
+//
+// ⚠ FULL-BUILD PIN EXPANSION NOTE:
+//   When all 8 MIDI UARTs are active, additional pin conflicts arise.
+//   Teensy 4.1 UART TX/RX pairs (hardware-fixed):
+//     Serial1 RX=0  TX=1  |  Serial2 RX=7  TX=8  |  Serial3 RX=15 TX=14
+//     Serial4 RX=16 TX=17 |  Serial5 RX=21 TX=20  |  Serial6 RX=25 TX=24
+//     Serial7 RX=28 TX=29 |  Serial8 RX=34 TX=35
+//   Impact on this sketch when all 8 ports are active:
+//     - Encoder 1 (14,15) conflicts with Serial3 → remap to free pins (e.g. 12, 33)
+//     - Encoder 2 (16,17) conflicts with Serial4 → remap (e.g. 30, 31)
+//     - CV_PINS[6]=8 conflicts with Serial2 TX → change CV array (skip 7,8)
+//     - BTN_START_STOP=20 conflicts with Serial5 TX → remap (e.g. 22)
+//     - LED_PIN=24 conflicts with Serial6 TX → remap (e.g. 33)
+//     - BTN_LED_GREEN=25 conflicts with Serial6 RX → remap (e.g. 33 — must be PWM; 26 is NOT)
+//     - BTN_LED_RED=28 conflicts with Serial7 RX → remap (e.g. 36 — must be PWM)
+//   These conflicts ONLY affect you when you wire up Serial3–8.
+//   For the TEST STAGE (Serial1 + Serial2 only), all pins above are safe.
 
 
 // ============================================================================
@@ -181,6 +288,7 @@ enum UILevel {
 enum PortParam {
   PARAM_TYPE,      // MIDI or CV
   PARAM_DIVISION,  // Musical clock division
+  PARAM_SHIFT,     // Time shift in ms (offset from the master grid)
   PARAM_SWING,     // Swing percentage
   PARAM_ENABLED,   // Port on/off
   PARAM_COUNT      // Always last — used for wrap-around arithmetic
@@ -202,6 +310,7 @@ struct PortConfig {
   PortType type;      // MIDI or CV
   uint8_t  division;  // Index into divisionNames[] / divisionTicks[]
   uint8_t  swing;     // Swing percentage: 50 = straight, 90 = heavy swing
+  int8_t   shift;     // Time shift in 0.5ms steps: -100…+100 = ±50ms, 0 = on grid
   bool     enabled;   // Whether this port is active
 };
 
@@ -254,6 +363,11 @@ const uint16_t divisionTicks[NUM_DIVISIONS] = {
    48   // Volca 2PPQN  (96 / 2) — same period as 8th note
 };
 
+// The only valid division for a MIDI-type port. MIDI receivers derive tempo
+// by assuming 24 clocks per quarter note; any other rate makes the follower
+// run at the wrong tempo (e.g. "Quarter" = 1/24th of the dialled BPM).
+const uint8_t DIV_MIDI24 = 6;  // index into divisionTicks[] / divisionNames[]
+
 
 // ============================================================================
 //  GLOBAL STATE — CLOCK
@@ -266,6 +380,14 @@ volatile uint32_t internalTickCount   = 0;       // 0–95, wraps at INTERNAL_PP
 
 float speedMultiplier = 1.0f;  // 0.5 / 1.0 / 2.0 depending on toggle switch
 
+// USB MIDI clock handoff: the ISR produces ticks, loop() consumes them.
+// Two separate counters (each with a single writer) instead of one shared
+// counter, because `pending--` in loop() would be a read-modify-write that
+// an ISR increment could interleave with and get lost. Equality comparison
+// of two independently-written uint32s is race-free.
+volatile uint32_t usbClockProduced = 0;  // written only by clockISR
+uint32_t          usbClockConsumed = 0;  // written only by loop()
+
 
 // ============================================================================
 //  GLOBAL STATE — PORTS
@@ -275,14 +397,14 @@ float speedMultiplier = 1.0f;  // 0.5 / 1.0 / 2.0 depending on toggle switch
 // Division indices refer to divisionTicks[] above:
 //   0=Whole, 1=Half, 2=Quarter, 3=8th, 4=16th, 5=32nd, 6=MIDI(24), 7=Volca
 PortConfig ports[8] = {
-  {PORT_MIDI, 2, 50, true},   // port 1: MIDI out, quarter note
-  {PORT_CV,   2, 50, true},   // port 2: CV,  quarter note
-  {PORT_CV,   3, 50, true},   // port 3: CV,  8th note
-  {PORT_CV,   4, 50, true},   // port 4: CV,  16th note
-  {PORT_CV,   1, 50, true},   // port 5: CV,  half note
-  {PORT_CV,   0, 50, true},   // port 6: CV,  whole note
-  {PORT_CV,   2, 50, true},   // port 7: CV,  quarter note
-  {PORT_CV,   2, 50, true},   // port 8: CV,  quarter note
+  {PORT_MIDI, 6, 50, 0, true},   // port 1: MIDI out, MIDI(24) — MIDI ports are locked to this rate
+  {PORT_CV,   2, 50, 0, true},   // port 2: CV,  quarter note
+  {PORT_CV,   3, 50, 0, true},   // port 3: CV,  8th note
+  {PORT_CV,   4, 50, 0, true},   // port 4: CV,  16th note
+  {PORT_CV,   1, 50, 0, true},   // port 5: CV,  half note
+  {PORT_CV,   0, 50, 0, true},   // port 6: CV,  whole note
+  {PORT_CV,   2, 50, 0, true},   // port 7: CV,  quarter note
+  {PORT_CV,   2, 50, 0, true},   // port 8: CV,  quarter note
 };
 
 // Per-port tick counters for clock division.
@@ -291,7 +413,7 @@ PortConfig ports[8] = {
 volatile uint16_t portTickCount[8] = {0};
 
 // Per-port CV pulse-off times (micros timestamp when pulse should end).
-// volatile — written by clockISR and updateCVSwingTriggers, read by updateCVPulseOff.
+// volatile — written by clockISR and updateScheduledPulses, read by updateCVPulseOff.
 volatile uint32_t cvPulseOffTime[8] = {0};
 
 // Per-port swing: 8th-note phase tracker (0 = downbeat, 1 = upbeat).
@@ -302,9 +424,18 @@ uint8_t eighthNotePhase[8] = {0};
 // volatile — written by updateSwingDelays in loop(), read by clockISR.
 volatile uint32_t swingDelayMicros[8] = {0};
 
-// Per-port delayed CV pulse trigger times (for swing on upbeats).
-// volatile — written by clockISR, read and cleared by updateCVSwingTriggers in loop().
-volatile uint32_t cvSwingTriggerTime[8] = {0};
+// Pre-computed effective time shift per port, in microseconds, always in
+// [0, port period). Negative user shifts are folded to their positive
+// equivalent (firing 10ms early = firing period−10ms after the previous
+// grid tick), so the ISR only ever schedules forward in time.
+// volatile — written by updateShiftDelays in loop(), read by clockISR.
+volatile uint32_t shiftDelayMicros[8] = {0};
+
+// Per-port scheduled pulse times (time-shifted pulses, and swing-delayed
+// CV upbeats). One pending event per port — the ISR keeps total delay
+// under one period, so a second event can never queue behind the first.
+// volatile — written by clockISR, read and cleared by updateScheduledPulses in loop().
+volatile uint32_t pulseTriggerTime[8] = {0};
 
 
 // ============================================================================
@@ -322,7 +453,7 @@ bool      displayNeedsUpdate = true;
 // ============================================================================
 
 // millis() timestamp of last pulse per port.
-// volatile — written by clockISR and updateCVSwingTriggers, read by updateAllLEDs.
+// volatile — written by clockISR and updateScheduledPulses, read by updateAllLEDs.
 volatile uint32_t ledFlashTime[8] = {0};
 
 
@@ -364,6 +495,9 @@ bool     btnPendingSingle  = false;  // single-press deferred until double-press
 bool     navLastState  = HIGH;
 uint32_t navPressTime  = 0;
 bool     navButtonHeld = false;
+// Set when an encoder is turned while the button is held (coarse-adjust
+// modifier). The release is then swallowed instead of navigating the menu.
+bool     navButtonUsedAsModifier = false;
 
 // Tap tempo
 uint32_t tapTimes[4] = {0};
@@ -377,7 +511,7 @@ uint8_t  tapIndex    = 0;
 IntervalTimer clockTimer;
 
 Encoder tempoEncoder(14, 15);  // Encoder 1: Tempo
-Encoder navEncoder(18, 19);    // Encoder 2: Port config navigation
+Encoder navEncoder(16, 17);    // Encoder 2: Port config navigation (16,17 — 18,19 are I2C)
 
 long lastTempoEncoderPos = 0;
 long lastNavEncoderPos   = 0;
@@ -426,6 +560,25 @@ void updateSwingDelays() {
   }
 }
 
+// Recompute the effective time-shift delay for every port.
+// Call after any BPM change, or after editing a port's shift or division
+// (both change the shift's relationship to the port's pulse period).
+//
+// The user's shift is folded into [0, period): a negative shift (fire early)
+// becomes an equivalent positive delay from the PREVIOUS grid tick, and a
+// shift beyond one period wraps (shifting a periodic pulse train by a full
+// period is indistinguishable from not shifting it). The result: the ISR
+// only ever schedules forward, and at most one pulse is pending per port.
+void updateShiftDelays() {
+  for (int i = 0; i < 8; i++) {
+    int32_t periodUs = (int32_t)(pulseIntervalMicros * divisionTicks[ports[i].division]);
+    int32_t shiftUs  = (int32_t)ports[i].shift * 500;  // 0.5ms steps → µs
+    int32_t eff = shiftUs % periodUs;
+    if (eff < 0) eff += periodUs;
+    shiftDelayMicros[i] = (uint32_t)eff;
+  }
+}
+
 
 // ============================================================================
 //  MIDI PORT HELPERS
@@ -453,6 +606,31 @@ void sendToAllMIDIPorts(uint8_t msg) {
 
 
 // ============================================================================
+//  USB MIDI OUTPUT
+//
+//  The USB connection acts as a ninth clock output, fixed at the raw
+//  24 PPQN MIDI clock rate (no division/swing — DAWs subdivide internally).
+//  Transport messages are sent directly from loop() context; clock ticks
+//  are counted by the ISR and drained here. See the v0.3 changelog entry
+//  for why the ISR must not call usbMIDI itself.
+// ============================================================================
+
+// Called from main loop — sends any USB clock ticks the ISR has counted.
+void updateUSBMIDI() {
+  bool sent = false;
+  while (usbClockConsumed != usbClockProduced) {
+    usbMIDI.sendRealTime(usbMIDI.Clock);
+    usbClockConsumed++;
+    sent = true;
+  }
+  if (sent) usbMIDI.send_now();  // flush immediately — don't wait for USB buffering
+
+  // Drain and discard any incoming USB MIDI so the receive buffer never fills.
+  while (usbMIDI.read()) {}
+}
+
+
+// ============================================================================
 //  CV OUTPUT HELPERS
 // ============================================================================
 
@@ -467,24 +645,48 @@ void initCVPins() {
 void updateCVPulseOff() {
   uint32_t now = micros();
   for (int i = 0; i < 8; i++) {
-    if (cvPulseOffTime[i] > 0 && now >= cvPulseOffTime[i]) {
+    // Signed-difference comparison is wraparound-safe. micros() wraps every
+    // ~71.6 minutes; a plain `now >= offTime` scheduled just before the wrap
+    // would stay false for over an hour, leaving the CV pin stuck HIGH.
+    if (cvPulseOffTime[i] > 0 && (int32_t)(now - cvPulseOffTime[i]) >= 0) {
       digitalWriteFast(CV_PINS[i], LOW);
       cvPulseOffTime[i] = 0;
     }
   }
 }
 
-// Called from main loop — fires any CV pulses that have been swing-delayed.
-void updateCVSwingTriggers() {
+// Called from main loop — fires any scheduled pulses whose time has come:
+// time-shifted pulses (either port type) and swing-delayed CV upbeats.
+//
+// Timing note: because this runs from loop(), scheduled pulses jitter by
+// the loop latency — microseconds normally, up to ~6ms while the OLED is
+// redrawing. On-grid pulses (shift 0, no swing) fire in the ISR and are
+// unaffected. A dedicated hardware-timer scheduler could remove this.
+void updateScheduledPulses() {
   uint32_t now = micros();
   for (int i = 0; i < 8; i++) {
-    if (cvSwingTriggerTime[i] > 0 && now >= cvSwingTriggerTime[i]) {
-      if (ports[i].enabled && ports[i].type == PORT_CV) {
-        digitalWriteFast(CV_PINS[i], HIGH);
-        cvPulseOffTime[i] = now + CV_PULSE_WIDTH_US;
-        ledFlashTime[i]   = millis();
+    uint32_t t = pulseTriggerTime[i];
+    // Signed-difference comparison — wraparound-safe (see updateCVPulseOff).
+    if (t > 0 && (int32_t)(now - t) >= 0) {
+      if (ports[i].enabled) {
+        if (ports[i].type == PORT_CV) {
+          digitalWriteFast(CV_PINS[i], HIGH);
+          cvPulseOffTime[i] = now + CV_PULSE_WIDTH_US;
+        } else {
+          // Same guard as the ISR path: never block on a full TX buffer.
+          if (midiPorts[i]->availableForWrite() > 0) {
+            midiPorts[i]->write(MIDI_CLOCK);
+          }
+        }
+        ledFlashTime[i] = millis();
       }
-      cvSwingTriggerTime[i] = 0;
+      // Clear only if the ISR hasn't scheduled a NEW trigger since we read t —
+      // blindly writing 0 could erase a fresh trigger and drop a pulse.
+      // noInterrupts() (PRIMASK) blocks even the priority-0 clock ISR, making
+      // the compare-and-clear atomic; the window is a few CPU cycles.
+      noInterrupts();
+      if (pulseTriggerTime[i] == t) pulseTriggerTime[i] = 0;
+      interrupts();
     }
   }
 }
@@ -506,6 +708,14 @@ void FASTRUN clockISR() {
 
   uint32_t now = micros();
 
+  // USB MIDI clock: 24 PPQN = every 4th internal tick (96 / 24).
+  // Only count here — loop() sends. Calling usbMIDI from this ISR could
+  // busy-wait forever: its timeout needs millis() to advance, and SysTick
+  // cannot preempt priority 0. (96 % 4 == 0, so the wrap keeps alignment.)
+  if ((internalTickCount & 3u) == 0) {
+    usbClockProduced++;
+  }
+
   for (int i = 0; i < 8; i++) {
     if (!ports[i].enabled) continue;
 
@@ -521,25 +731,43 @@ void FASTRUN clockISR() {
       bool isUpbeat = (eighthNotePhase[i] == 1);
       eighthNotePhase[i] ^= 1;
 
-      if (ports[i].type == PORT_MIDI) {
-        // Send MIDI clock byte immediately via hardware UART.
-        midiPorts[i]->write(MIDI_CLOCK);
+      // Total delay from the grid for this pulse: the port's time shift,
+      // plus swing on CV upbeats. `now` IS the grid — shift is always an
+      // offset from it, never an adjustment to the tick counter, so setting
+      // shift back to 0 lands the port exactly back on the grid.
+      uint32_t fireDelay = shiftDelayMicros[i];
+      if (ports[i].type == PORT_CV && isUpbeat) {
+        fireDelay += swingDelayMicros[i];
+      }
+      if (fireDelay > 0) {
+        // Wrap into one period so at most one pulse is ever pending per
+        // port (pulseTriggerTime[] holds a single event per port).
+        uint32_t period = pulseIntervalMicros * divisionTicks[ports[i].division];
+        fireDelay %= period;
+      }
+
+      if (fireDelay > 0) {
+        // Schedule — updateScheduledPulses() in loop() fires it.
+        pulseTriggerTime[i] = now + fireDelay;
+
+      } else if (ports[i].type == PORT_MIDI) {
+        // On-grid: send MIDI clock byte immediately via hardware UART.
+        // Guard: write() blocks when the TX buffer is full, and at ISR
+        // priority 0 the UART interrupt can never preempt us to drain it —
+        // that would deadlock the device. Dropping one clock byte under
+        // pathological load is the lesser evil.
+        if (midiPorts[i]->availableForWrite() > 0) {
+          midiPorts[i]->write(MIDI_CLOCK);
+        }
         // millis() is safe here on Teensy 4.1 but may be ~1ms stale at
         // high ISR priority. Imperceptible for LED flash purposes.
         ledFlashTime[i] = millis();
 
       } else {
-        // CV output
-        if (isUpbeat && swingDelayMicros[i] > 0) {
-          // Schedule this upbeat pulse to fire after the swing delay.
-          // updateCVSwingTriggers() in loop() will watch for it.
-          cvSwingTriggerTime[i] = now + swingDelayMicros[i];
-        } else {
-          // Fire immediately
-          digitalWriteFast(CV_PINS[i], HIGH);
-          cvPulseOffTime[i] = now + CV_PULSE_WIDTH_US;
-          ledFlashTime[i]   = millis();
-        }
+        // On-grid: fire the CV pulse immediately.
+        digitalWriteFast(CV_PINS[i], HIGH);
+        cvPulseOffTime[i] = now + CV_PULSE_WIDTH_US;
+        ledFlashTime[i]   = millis();
       }
     }
   }
@@ -561,12 +789,18 @@ void startClock() {
   for (int i = 0; i < 8; i++) {
     portTickCount[i]      = 0;
     eighthNotePhase[i]    = 0;
-    cvSwingTriggerTime[i] = 0;
+    pulseTriggerTime[i]   = 0;
     cvPulseOffTime[i]     = 0;
   }
 
+  // Reset the USB clock handoff counters (safe: ISR is not running yet).
+  usbClockProduced = 0;
+  usbClockConsumed = 0;
+
   clockRunning = true;
   sendToAllMIDIPorts(MIDI_START);
+  usbMIDI.sendRealTime(usbMIDI.Start);
+  usbMIDI.send_now();
   clockTimer.begin(clockISR, pulseIntervalMicros);
   // FIXED v0.2: Explicitly set highest interrupt priority.
   // Without this, Teensyduino's default IntervalTimer priority may allow
@@ -582,12 +816,14 @@ void stopClock() {
   clockRunning = false;
   clockTimer.end();
   sendToAllMIDIPorts(MIDI_STOP);
+  usbMIDI.sendRealTime(usbMIDI.Stop);
+  usbMIDI.send_now();
 
   // Kill all CV outputs immediately.
   for (int i = 0; i < 8; i++) {
     digitalWriteFast(CV_PINS[i], LOW);
     cvPulseOffTime[i]     = 0;
-    cvSwingTriggerTime[i] = 0;
+    pulseTriggerTime[i]   = 0;
   }
 
   displayNeedsUpdate = true;
@@ -602,13 +838,24 @@ void resyncClock() {
   for (int i = 0; i < 8; i++) {
     portTickCount[i]      = 0;
     eighthNotePhase[i]    = 0;
-    cvSwingTriggerTime[i] = 0;
+    pulseTriggerTime[i]   = 0;
   }
+
+  // Send CONTINUE before re-arming the timer: once the ISR is live it also
+  // writes to these UARTs, and HardwareSerial isn't safe against concurrent
+  // writes from loop() and a higher-priority ISR. (MIDI also specifies
+  // Continue arrives before the clock resumes.)
+  sendToAllMIDIPorts(MIDI_CONTINUE);
+  usbMIDI.sendRealTime(usbMIDI.Continue);
+  usbMIDI.send_now();
+
+  // Reset the USB clock handoff counters (safe: timer is stopped here).
+  usbClockProduced = 0;
+  usbClockConsumed = 0;
 
   clockTimer.begin(clockISR, pulseIntervalMicros);
   // FIXED v0.2: Re-apply priority after re-arming the timer.
   clockTimer.priority(0);
-  sendToAllMIDIPorts(MIDI_CONTINUE);
 
   displayNeedsUpdate = true;
 }
@@ -628,9 +875,12 @@ void handleTempoEncoder() {
 
     // Hold nav encoder button while turning tempo encoder for coarse adjust:
     // 5 BPM per step instead of 0.5 BPM.
-    float increment = (digitalRead(NAV_BTN_PIN) == LOW) ? 5.0f : 0.5f;
+    bool coarse = (digitalRead(NAV_BTN_PIN) == LOW);
+    if (coarse) navButtonUsedAsModifier = true;  // don't navigate on release
+    float increment = coarse ? 5.0f : 0.5f;
     updateBPM(bpm + (steps * increment));
     updateSwingDelays();
+    updateShiftDelays();
 
     if (clockRunning) {
       clockTimer.update(pulseIntervalMicros);  // adjust rate without restarting
@@ -667,6 +917,9 @@ void editCurrentValue(int steps) {
         midiPorts[selectedPort]->begin(31250);
         digitalWriteFast(CV_PINS[selectedPort], LOW);
         pinMode(CV_PINS[selectedPort], INPUT);  // release the pin
+        // MIDI ports are locked to the standard 24 PPQN rate — any carried-over
+        // CV division would make the receiving device run at the wrong tempo.
+        p.division = DIV_MIDI24;
       } else {
         // Switching TO CV: set pin as output, ensure it starts LOW.
         pinMode(CV_PINS[selectedPort], OUTPUT);
@@ -675,18 +928,35 @@ void editCurrentValue(int steps) {
 
       // Reset this port's tick counter so the new type takes effect cleanly.
       portTickCount[selectedPort] = 0;
+      updateShiftDelays();  // division may have changed with the type
 
       if (wasRunning) startClock();
       break;
     }
 
     case PARAM_DIVISION:
+      // Division is locked on MIDI ports (always MIDI(24) — see DIV_MIDI24).
+      if (p.type == PORT_MIDI) break;
       p.division = (uint8_t)constrain((int)p.division + steps, 0, NUM_DIVISIONS - 1);
       // Reset tick counter so new division takes effect at next beat boundary.
       portTickCount[selectedPort] = 0;
+      updateShiftDelays();  // period changed — refold the shift into it
       break;
 
+    case PARAM_SHIFT: {
+      // 0.5ms per detent; hold the encoder button while turning for 5ms steps.
+      int stepSize = (digitalRead(NAV_BTN_PIN) == LOW) ? 10 : 1;
+      p.shift = (int8_t)constrain((int)p.shift + steps * stepSize, -100, 100);
+      updateShiftDelays();
+      break;
+    }
+
     case PARAM_SWING:
+      // Swing is locked on MIDI ports — it only affects CV pulses. Swinging
+      // a MIDI clock stream needs unevenly-spaced ticks (many pulses in
+      // flight per port with different delays), which the one-pending-event
+      // scheduler cannot represent. See the swing notes in clockISR.
+      if (p.type == PORT_MIDI) break;
       p.swing = (uint8_t)constrain((int)p.swing + steps, 50, 90);
       updateSwingDelays();
       break;
@@ -710,6 +980,10 @@ void handleNavEncoder() {
   if (abs(delta) >= 4) {
     int steps = delta / 4;
     lastNavEncoderPos = pos;
+
+    // Turning while the button is held = coarse-adjust modifier in use;
+    // the release must not be treated as a navigation press.
+    if (digitalRead(NAV_BTN_PIN) == LOW) navButtonUsedAsModifier = true;
 
     switch (currentLevel) {
       case LEVEL_PORT_SELECT:
@@ -746,9 +1020,20 @@ void handleNavButton() {
     navButtonHeld    = false;
     navLastState     = HIGH;
 
-    if (heldFor >= LONG_PRESS_MS) {
-      // Long press — escape back to top level from anywhere.
-      currentLevel = LEVEL_PORT_SELECT;
+    if (navButtonUsedAsModifier) {
+      // Button was held as a coarse-adjust modifier while an encoder turned —
+      // that's not a navigation press. Swallow it.
+      navButtonUsedAsModifier = false;
+
+    } else if (heldFor >= LONG_PRESS_MS) {
+      if (currentLevel == LEVEL_VALUE_EDIT && selectedParam == PARAM_SHIFT) {
+        // Long press while editing Shift: snap the port back onto the grid.
+        ports[selectedPort].shift = 0;
+        updateShiftDelays();
+      } else {
+        // Long press — escape back to top level from anywhere.
+        currentLevel = LEVEL_PORT_SELECT;
+      }
     } else {
       // Short press — advance deeper into the menu hierarchy.
       switch (currentLevel) {
@@ -886,6 +1171,7 @@ void handleTapTempo() {
     float newBPM      = 60000.0f / avgInterval;
     updateBPM(newBPM);
     updateSwingDelays();
+    updateShiftDelays();
     if (clockRunning) clockTimer.update(pulseIntervalMicros);
     displayNeedsUpdate = true;
   }
@@ -908,6 +1194,7 @@ void handleSpeedSwitch() {
     speedMultiplier = newMult;
     updateBPM(bpm);  // recalculates pulseIntervalMicros and quarterNoteMicros
     updateSwingDelays();
+    updateShiftDelays();
     if (clockRunning) clockTimer.update(pulseIntervalMicros);
     displayNeedsUpdate = true;
   }
@@ -960,6 +1247,18 @@ void updateAllLEDs() {
 //    LEVEL_VALUE_EDIT   — single parameter editing view
 // ============================================================================
 
+// Print a shift value in ms with an explicit sign. Exactly 0 prints as a
+// plain "0" (no sign, no decimals) so an on-grid port is obvious at a glance.
+// (shift is stored in 0.5ms steps; print() supplies the "-" for negatives.)
+void printShiftValue(int8_t shiftHalfMs) {
+  if (shiftHalfMs == 0) {
+    display.print("0");
+    return;
+  }
+  if (shiftHalfMs > 0) display.print("+");
+  display.print(shiftHalfMs * 0.5f, 1);
+}
+
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
@@ -996,21 +1295,30 @@ void updateDisplay() {
       int col = (i % 4) * 32;
       int row = (i / 4) * 10 + 30;
       display.setCursor(col, row);
-      display.print(i == selectedPort ? ">" : " ");
+      // ">" = selected; "*" = port has a nonzero time shift (off the grid)
+      if (i == selectedPort)          display.print(">");
+      else if (ports[i].shift != 0)   display.print("*");
+      else                            display.print(" ");
       display.print(i + 1);
       display.print(":");
       display.print(ports[i].type == PORT_MIDI ? "MI" : "CV");
     }
 
-    // Selected port detail at bottom
+    // Selected port detail at bottom — shows the time shift when nonzero
+    // (a stray shift should never be invisible), swing otherwise.
     display.setCursor(0, 54);
     display.print("P");
     display.print(selectedPort + 1);
     display.print(": ");
     display.print(divisionNames[ports[selectedPort].division]);
-    display.print(" SW:");
-    display.print(ports[selectedPort].swing);
-    display.print("%");
+    if (ports[selectedPort].shift != 0) {
+      display.print(" TS:");
+      printShiftValue(ports[selectedPort].shift);
+    } else {
+      display.print(" SW:");
+      display.print(ports[selectedPort].swing);
+      display.print("%");
+    }
 
   } else if (currentLevel == LEVEL_PARAM_SELECT) {
     display.setTextSize(1);
@@ -1020,10 +1328,17 @@ void updateDisplay() {
     display.print(" - ");
     display.print(ports[selectedPort].type == PORT_MIDI ? "MIDI" : "CV  ");
 
-    const char* paramNames[PARAM_COUNT] = {"Type", "Division", "Swing", "Enabled"};
+    const char* paramNames[PARAM_COUNT] = {"Type", "Division", "Shift", "Swing", "Enabled"};
 
-    for (int i = 0; i < PARAM_COUNT; i++) {
-      display.setCursor(0, 38 + i * 8);
+    // Five parameters no longer fit under the header on the 64px display —
+    // show a 3-row window that scrolls with the selection.
+    int firstRow = (int)selectedParam - 1;
+    if (firstRow < 0) firstRow = 0;
+    if (firstRow > PARAM_COUNT - 3) firstRow = PARAM_COUNT - 3;
+
+    for (int row = 0; row < 3; row++) {
+      int i = firstRow + row;
+      display.setCursor(0, 40 + row * 8);
       display.print(i == (int)selectedParam ? "> " : "  ");
       display.print(paramNames[i]);
       display.print(": ");
@@ -1034,6 +1349,10 @@ void updateDisplay() {
           break;
         case PARAM_DIVISION:
           display.print(divisionNames[ports[selectedPort].division]);
+          break;
+        case PARAM_SHIFT:
+          printShiftValue(ports[selectedPort].shift);
+          if (ports[selectedPort].shift != 0) display.print("ms");
           break;
         case PARAM_SWING:
           display.print(ports[selectedPort].swing);
@@ -1051,32 +1370,72 @@ void updateDisplay() {
     display.print("PORT ");
     display.print(selectedPort + 1);
 
-    const char* paramNames[PARAM_COUNT] = {"Type", "Division", "Swing", "Enabled"};
+    const char* paramNames[PARAM_COUNT] = {"Type", "Division", "Shift", "Swing", "Enabled"};
     display.print(" - ");
     display.print(paramNames[selectedParam]);
 
-    // Show current value large, centred, with < > arrows
-    display.setTextSize(2);
-    display.setCursor(10, 42);
-    display.print("< ");
+    // Division and Swing are not editable on MIDI ports — show the value in
+    // square brackets (instead of the < > "adjustable" arrows) plus a hint
+    // line saying why.
+    bool valueLocked = (ports[selectedPort].type == PORT_MIDI &&
+                        (selectedParam == PARAM_DIVISION ||
+                         selectedParam == PARAM_SWING));
 
-    switch (selectedParam) {
-      case PARAM_TYPE:
-        display.print(ports[selectedPort].type == PORT_MIDI ? "MIDI" : "CV  ");
-        break;
-      case PARAM_DIVISION:
+    if (valueLocked) {
+      display.setTextSize(2);
+      display.setCursor(0, 38);
+      display.print("[");
+      if (selectedParam == PARAM_DIVISION) {
         display.print(divisionNames[ports[selectedPort].division]);
-        break;
-      case PARAM_SWING:
+      } else {
         display.print(ports[selectedPort].swing);
         display.print("%");
-        break;
-      case PARAM_ENABLED:
-        display.print(ports[selectedPort].enabled ? "YES" : "NO ");
-        break;
-    }
+      }
+      display.print("]");
+      display.setTextSize(1);
+      display.setCursor(0, 56);
+      display.print(selectedParam == PARAM_DIVISION
+                    ? "LOCKED - MIDI 24 PPQN"
+                    : "LOCKED - CV ports only");
 
-    display.print(" >");
+    } else if (selectedParam == PARAM_SHIFT) {
+      // Shift gets its own layout: value raised to make room for a hint line.
+      display.setTextSize(2);
+      display.setCursor(10, 38);
+      display.print("< ");
+      printShiftValue(ports[selectedPort].shift);
+      display.print(" >");
+      display.setTextSize(1);
+      display.setCursor(0, 56);
+      display.print("ms  (long-press = 0)");
+
+    } else {
+      // Show current value large, centred, with < > arrows
+      display.setTextSize(2);
+      display.setCursor(10, 42);
+      display.print("< ");
+
+      switch (selectedParam) {
+        case PARAM_TYPE:
+          display.print(ports[selectedPort].type == PORT_MIDI ? "MIDI" : "CV  ");
+          break;
+        case PARAM_DIVISION:
+          display.print(divisionNames[ports[selectedPort].division]);
+          break;
+        case PARAM_SWING:
+          display.print(ports[selectedPort].swing);
+          display.print("%");
+          break;
+        case PARAM_ENABLED:
+          display.print(ports[selectedPort].enabled ? "YES" : "NO ");
+          break;
+
+        default:
+          break;
+      }
+
+      display.print(" >");
+    }
   }
 
   display.display();
@@ -1111,6 +1470,7 @@ void setup() {
   // Calculate initial timing values
   updateBPM(120.0f);
   updateSwingDelays();
+  updateShiftDelays();
 
   // Initialise NeoPixel LEDs
   leds.begin();
@@ -1157,7 +1517,8 @@ void loop() {
   handleStartStopButton();   // Start / Stop / Resync
   handleSpeedSwitch();       // Half / Normal / Double speed toggle
   updateCVPulseOff();        // Turn off CV pulses whose time has elapsed
-  updateCVSwingTriggers();   // Fire any swing-delayed CV pulses
+  updateScheduledPulses();   // Fire time-shifted / swing-delayed pulses
+  updateUSBMIDI();           // Send ISR-counted clock ticks to USB MIDI
   updateAllLEDs();           // Update NeoPixel LEDs (each port at its own rate)
   updateButtonLED();         // Breathe start/stop button LED in sync with BPM
 
