@@ -34,7 +34,7 @@
 //  v0.4  — 2026-07-03
 //    ADDED   Per-port time shift: ±50ms in 0.5ms steps (5ms steps with the
 //            encoder button held). Shift is always computed as an offset
-//            from the master grid — never by adjusting a port's tick
+//            from the reference grid — never by adjusting a port's tick
 //            counter — so setting it back to 0 returns the port EXACTLY
 //            to the grid, guaranteed. Long-press while editing Shift snaps
 //            it to 0. Ports with a nonzero shift show a "*" marker on the
@@ -288,7 +288,7 @@ enum UILevel {
 enum PortParam {
   PARAM_TYPE,      // MIDI or CV
   PARAM_DIVISION,  // Musical clock division
-  PARAM_SHIFT,     // Time shift in ms (offset from the master grid)
+  PARAM_SHIFT,     // Time shift in ms (offset from the reference grid)
   PARAM_SWING,     // Swing percentage
   PARAM_ENABLED,   // Port on/off
   PARAM_COUNT      // Always last — used for wrap-around arithmetic

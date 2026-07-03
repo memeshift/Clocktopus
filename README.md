@@ -36,8 +36,8 @@ Clocktopus soothes the stress of syncing your gear so you can play with other pe
 - **Tempo range** — 20 to 300 BPM
 - **Internal high-resolution clock** — 96 pulses per quarter note internal
   resolution for precise, stable timing across all outputs
-- **Sub-microsecond timing jitter** — hardware timer-driven clock engine
-  for the tightest possible sync
+- **Low-jitter clock engine** — timer-driven core clock designed for
+  sub-microsecond jitter (see prototype status below)
 - **MIDI clock output** — standard 24 PPQN on all MIDI-configured ports,
   compatible with virtually every MIDI device ever made
 - **Start, Stop, and Continue** — full MIDI transport control sent to all
@@ -47,7 +47,8 @@ Clocktopus soothes the stress of syncing your gear so you can play with other pe
 
 ## Rhythm & Feel
 
-- **Per-port time shift** — +/-1 millisecond adjustment to bring signals forward or delay them 
+- **Per-port time shift** — ±50 milliseconds in 0.5ms steps, to nudge an
+  instrument earlier or later while everything else stays locked to the grid
 - **Per-port clock division** — each output independently set to its own
   rhythmic subdivision:
   - Whole note (1 pulse per bar)
@@ -115,8 +116,9 @@ Clocktopus soothes the stress of syncing your gear so you can play with other pe
 - **Faceted dome enclosure** — distinctive half-sphere form, stable on
   any surface, designed to be as wonderful to look at as to use
 - **Open hardware and firmware** — the full design and code are openly
-  available; Clocktopus can be understood, repaired, and modified by
-  anyone with the curiosity to look inside
+  available under the GNU GPL 3.0 (see LICENSE); Clocktopus can be
+  understood, repaired, and modified by anyone with the curiosity to
+  look inside
 
 ---
 
@@ -143,5 +145,14 @@ and Korg Volca series (via Volca preset).
 
 ---
 
-*Current version: Clocktopus v0.1 prototype*
-*Platform: Teensy 4.1 — open hardware*
+## Prototype Status
+
+This README describes the finished Clocktopus. The firmware is at v0.4 and
+has not yet been flashed to hardware. A few listed features are still in
+development: MIDI clock swing, tap tempo (implemented in firmware but not
+yet wired to a button), and the hardware-timer pulse scheduler that will
+deliver the final jitter target on shifted and swung outputs.
+
+---
+
+*Firmware: v0.4 — Platform: Teensy 4.1 — open hardware*
