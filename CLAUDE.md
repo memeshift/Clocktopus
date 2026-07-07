@@ -69,5 +69,7 @@ These shape code, docs, naming, and hardware decisions — not just marketing co
   ~240µs — the largest remaining jitter source)
 - MIDI clock swing (needs per-port event queue — see v0.4 changelog)
 - Tap tempo function exists but no button is wired to call it
-- Nothing has been flashed to hardware yet; smoke test = USB MIDI clock into
-  a MIDI monitor, then shift on port 1 while watching the overview markers
+- First hardware flash 2026-07-07 19:27 CEST (bare Teensy 4.1): USB MIDI clock and
+  Start/Stop/Resync verified in a MIDI monitor. Everything else (OLED,
+  encoders, buttons, NeoPixels, DIN MIDI, CV) is unwired and untested;
+  remaining smoke test = shift on port 1 while watching the overview markers

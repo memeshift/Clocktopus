@@ -148,10 +148,14 @@ and Korg Volca series (via Volca preset).
 ## Prototype Status
 
 This README describes the finished Clocktopus. The firmware is at v0.4 and
-has not yet been flashed to hardware. A few listed features are still in
-development: MIDI clock swing, tap tempo (implemented in firmware but not
-yet wired to a button), and the hardware-timer pulse scheduler that will
-deliver the final jitter target on shifted and swung outputs.
+had its first hardware test on 7 July 2026 at 19:27 CEST: running on a bare Teensy 4.1, it
+delivered a steady 24 PPQN USB MIDI clock with Start/Stop/Resync transport,
+verified in a MIDI monitor. The display, controls, DIN MIDI, and CV outputs
+are not yet wired up, so everything beyond USB clock output remains untested
+on hardware. A few listed features are still in development: MIDI clock
+swing, tap tempo (implemented in firmware but not yet wired to a button),
+and the hardware-timer pulse scheduler that will deliver the final jitter
+target on shifted and swung outputs.
 
 ---
 
