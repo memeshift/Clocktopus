@@ -17,12 +17,12 @@
 //      Frosted clear button cap. Green breathes to BPM when running.
 //      Red glows dim steady when stopped.
 //    - Speed switch HALF (pin 21), DOUBLE (pin 22)
-//    - OLED display 128x64 I2C (SSD1306, address 0x3C)
+//    - OLED display 1.3" 128x64 I2C (SH1106, address 0x3C)
 //    - NeoPixel data pin 24
 //
 //  Dependencies (install via Arduino IDE Library Manager):
 //    - Teensyduino (from pjrc.com — includes IntervalTimer, Encoder)
-//    - Adafruit_SSD1306
+//    - Adafruit_SH110X
 //    - Adafruit_GFX
 //    - Adafruit_NeoPixel
 // ============================================================================
@@ -30,6 +30,57 @@
 
 // ============================================================================
 //  CHANGELOG
+//
+//  v0.5  — 2026-07-21
+//    Timing review against the E-RM jitter report and multiclock manual.
+//
+//    FIXED   USB MIDI clock and the DIN/CV outputs were permanently out of
+//            phase. The ISR emits a USB tick when internalTickCount == 0
+//            (read before the increment), so USB fired on ISR call 1 — but a
+//            port only fires once portTickCount reaches its division, so a
+//            MIDI port first fired on ISR call 4. That is a fixed 3-internal-
+//            tick skew (15.6ms at 120 BPM) between the same device's two
+//            clock outputs, for the whole session — not a startup transient.
+//            startClock()/resyncClock() now pre-load portTickCount[] to
+//            (division - 1) so every port fires on the first tick alongside
+//            USB. What remains is a uniform ~1-internal-tick latency between
+//            the START byte and the first clock, which moves all outputs
+//            together and is a calibration constant rather than skew.
+//
+//    FIXED   No contact debounce on either button. A bouncing start/stop
+//            switch produced extra falling edges well inside DOUBLE_PRESS_MS,
+//            so a single press could register as a double press and fire
+//            resyncClock() mid-performance. Both buttons now require
+//            BTN_DEBOUNCE_MS of settled state before an edge is accepted,
+//            and the state latch only advances on an accepted edge.
+//
+//    FIXED   micros() timestamp 0 was overloaded as the "nothing pending"
+//            sentinel in pulseTriggerTime[] and cvPulseOffTime[]. `now + delay`
+//            genuinely evaluates to 0 once per micros() wrap (~71.6 min),
+//            which silently dropped a scheduled pulse or — worse — left a CV
+//            pin latched HIGH until that port's next pulse. Timestamps that
+//            land on 0 are nudged to 1µs.
+//
+//    FIXED   Systematic tempo error from integer-microsecond timer periods.
+//            IntervalTimer's PIT is clocked at 24MHz (resolution 1/24 µs) and
+//            cyclesFromPeriod() takes a different path per argument type: an
+//            integer period truncates to (24*P - 1), a float period rounds to
+//            (24.0f*P - 0.5f). Handing it a uint32 µs value discarded that
+//            resolution — at 120 BPM the exact tick period is 5208.333µs, so
+//            5208 loaded 124992 cycles rather than 125000. The device ran
+//            120.0077 BPM instead of 120.000: 0.0064% fast, ≈19ms of
+//            accumulated phase drift every 5 minutes against a DAW at the same
+//            nominal tempo. The period is now kept as a float for the timer
+//            (pulseIntervalMicrosF) alongside the rounded integer copy the ISR
+//            uses for its period arithmetic.
+//
+//    KNOWN   Remaining jitter sources, in order of size:
+//            (1) Adafruit_NeoPixel's leds.show() bit-bangs inside
+//                noInterrupts() — ~240µs with the clock ISR blocked, called
+//                on every LED colour change. WS2812Serial (DMA) removes it.
+//            (2) OLED redraws block loop() (~23ms at 400kHz I2C), which
+//                jitters scheduled — not on-grid — pulses. Wire.setClock() at
+//                1MHz would more than halve it.
 //
 //  v0.4  — 2026-07-03
 //    ADDED   Per-port time shift: ±50ms in 0.5ms steps (5ms steps with the
@@ -179,7 +230,7 @@
 #include <Encoder.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h>
+#include <Adafruit_SH110X.h>
 #include <Adafruit_NeoPixel.h>
 
 
@@ -257,6 +308,11 @@ const uint8_t BTN_LED_RED_IDLE   = 40;   // steady dim red when clock is stopped
 
 // Double-press window for resync (milliseconds)
 const uint16_t DOUBLE_PRESS_MS = 400;
+
+// Contact bounce guard (milliseconds). A mechanical switch produces several
+// edges over 1–20ms; without this the extra edges land inside DOUBLE_PRESS_MS
+// and a single press registers as a double press, triggering a resync.
+const uint16_t BTN_DEBOUNCE_MS = 25;
 
 // Long press threshold for nav encoder (milliseconds)
 const uint16_t LONG_PRESS_MS = 600;
@@ -374,7 +430,23 @@ const uint8_t DIV_MIDI24 = 6;  // index into divisionTicks[] / divisionNames[]
 // ============================================================================
 
 volatile float    bpm                 = 120.0f;
-volatile uint32_t pulseIntervalMicros = 20833;  // recalculated by updateBPM()
+// Internal tick period, kept in two forms — both recalculated by updateBPM().
+//
+//   pulseIntervalMicros   integer µs. Used ONLY for the ISR's period arithmetic
+//                         (shift/swing wrapping), where sub-µs precision is
+//                         irrelevant and integer maths keeps the ISR cheap.
+//
+//   pulseIntervalMicrosF  exact µs, handed to IntervalTimer. The PIT is clocked
+//                         at 24MHz, so it resolves 1/24 µs — and
+//                         IntervalTimer::cyclesFromPeriod() has separate code
+//                         paths: an integer period truncates (24*P - 1), a float
+//                         period rounds to nearest (24.0f*P - 0.5f). At 120 BPM
+//                         the exact period is 5208.333µs; passing 5208 loaded
+//                         124992 cycles instead of 125000 — 0.0064% fast, about
+//                         19ms of accumulated drift per 5 minutes against a DAW.
+//                         Passing the float lands on the exact reload value.
+volatile uint32_t pulseIntervalMicros  = 5208;
+float             pulseIntervalMicrosF = 5208.3333f;
 volatile bool     clockRunning        = false;
 volatile uint32_t internalTickCount   = 0;       // 0–95, wraps at INTERNAL_PPQN
 
@@ -488,13 +560,15 @@ volatile uint32_t quarterNoteMicros = 500000;  // default: 120 BPM
 
 // Start/Stop button
 bool     btnLastState      = HIGH;
+uint32_t btnLastEdgeTime   = 0;      // last accepted edge — debounce reference
 uint32_t lastPressTime     = 0;
 bool     btnPendingSingle  = false;  // single-press deferred until double-press window expires
 
 // Nav encoder button
-bool     navLastState  = HIGH;
-uint32_t navPressTime  = 0;
-bool     navButtonHeld = false;
+bool     navLastState     = HIGH;
+uint32_t navLastEdgeTime  = 0;       // last accepted edge — debounce reference
+uint32_t navPressTime     = 0;
+bool     navButtonHeld    = false;
 // Set when an encoder is turned while the button is held (coarse-adjust
 // modifier). The release is then swallowed instead of navigating the menu.
 bool     navButtonUsedAsModifier = false;
@@ -516,7 +590,7 @@ Encoder navEncoder(16, 17);    // Encoder 2: Port config navigation (16,17 — 1
 long lastTempoEncoderPos = 0;
 long lastNavEncoderPos   = 0;
 
-Adafruit_SSD1306 display(128, 64, &Wire, -1);
+Adafruit_SH1106G display(128, 64, &Wire, -1);
 
 Adafruit_NeoPixel leds(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -536,8 +610,11 @@ void updateBPM(float newBPM) {
   bpm = constrain(newBPM, 20.0f, 300.0f);
   // Internal tick interval:
   //   60,000,000 µs/min  ÷  (BPM × speedMultiplier × INTERNAL_PPQN)
-  pulseIntervalMicros = (uint32_t)(60000000.0f /
-                        (bpm * speedMultiplier * (float)INTERNAL_PPQN));
+  pulseIntervalMicrosF = 60000000.0f /
+                         (bpm * speedMultiplier * (float)INTERNAL_PPQN);
+  // Round rather than truncate — the integer copy is only used for the ISR's
+  // period arithmetic, but there is no reason for it to be biased low.
+  pulseIntervalMicros  = (uint32_t)(pulseIntervalMicrosF + 0.5f);
   // Quarter-note duration for the button LED breathing cycle:
   //   60,000,000 µs/min  ÷  (BPM × speedMultiplier)
   quarterNoteMicros = (uint32_t)(60000000.0f / (bpm * speedMultiplier));
@@ -671,7 +748,8 @@ void updateScheduledPulses() {
       if (ports[i].enabled) {
         if (ports[i].type == PORT_CV) {
           digitalWriteFast(CV_PINS[i], HIGH);
-          cvPulseOffTime[i] = now + CV_PULSE_WIDTH_US;
+          uint32_t off      = now + CV_PULSE_WIDTH_US;   // 0 = "no pulse pending"
+          cvPulseOffTime[i] = (off == 0) ? 1 : off;
         } else {
           // Same guard as the ISR path: never block on a full TX buffer.
           if (midiPorts[i]->availableForWrite() > 0) {
@@ -748,7 +826,11 @@ void FASTRUN clockISR() {
 
       if (fireDelay > 0) {
         // Schedule — updateScheduledPulses() in loop() fires it.
-        pulseTriggerTime[i] = now + fireDelay;
+        // 0 is the "nothing pending" sentinel, and `now + fireDelay` really
+        // does land on 0 once per micros() wrap (~71.6 min), which would
+        // silently drop the pulse. Nudging to 1µs is imperceptible.
+        uint32_t t = now + fireDelay;
+        pulseTriggerTime[i] = (t == 0) ? 1 : t;
 
       } else if (ports[i].type == PORT_MIDI) {
         // On-grid: send MIDI clock byte immediately via hardware UART.
@@ -766,7 +848,11 @@ void FASTRUN clockISR() {
       } else {
         // On-grid: fire the CV pulse immediately.
         digitalWriteFast(CV_PINS[i], HIGH);
-        cvPulseOffTime[i] = now + CV_PULSE_WIDTH_US;
+        // 0 means "no pulse pending" — see the sentinel note above. Here the
+        // cost of losing the timestamp is a CV pin latched HIGH until the
+        // port's next pulse.
+        uint32_t off      = now + CV_PULSE_WIDTH_US;
+        cvPulseOffTime[i] = (off == 0) ? 1 : off;
         ledFlashTime[i]   = millis();
       }
     }
@@ -787,7 +873,12 @@ void startClock() {
   // Reset all per-port counters for a clean start from beat 1.
   internalTickCount = 0;
   for (int i = 0; i < 8; i++) {
-    portTickCount[i]      = 0;
+    // Pre-load so every port's first pulse lands on the very first ISR tick,
+    // in phase with the USB 24 PPQN stream (which fires when
+    // internalTickCount == 0). Starting from 0 delayed each port by its whole
+    // division before the first pulse — a MIDI port trailed USB by 3 internal
+    // ticks (15.6ms at 120 BPM), and that skew persisted for the whole session.
+    portTickCount[i]      = divisionTicks[ports[i].division] - 1;
     eighthNotePhase[i]    = 0;
     pulseTriggerTime[i]   = 0;
     cvPulseOffTime[i]     = 0;
@@ -801,7 +892,7 @@ void startClock() {
   sendToAllMIDIPorts(MIDI_START);
   usbMIDI.sendRealTime(usbMIDI.Start);
   usbMIDI.send_now();
-  clockTimer.begin(clockISR, pulseIntervalMicros);
+  clockTimer.begin(clockISR, pulseIntervalMicrosF);
   // FIXED v0.2: Explicitly set highest interrupt priority.
   // Without this, Teensyduino's default IntervalTimer priority may allow
   // UART or other ISRs to delay the clock, introducing jitter.
@@ -836,7 +927,8 @@ void resyncClock() {
 
   internalTickCount = 0;
   for (int i = 0; i < 8; i++) {
-    portTickCount[i]      = 0;
+    // See startClock() — pre-load keeps DIN, CV and USB outputs in phase.
+    portTickCount[i]      = divisionTicks[ports[i].division] - 1;
     eighthNotePhase[i]    = 0;
     pulseTriggerTime[i]   = 0;
   }
@@ -853,7 +945,7 @@ void resyncClock() {
   usbClockProduced = 0;
   usbClockConsumed = 0;
 
-  clockTimer.begin(clockISR, pulseIntervalMicros);
+  clockTimer.begin(clockISR, pulseIntervalMicrosF);
   // FIXED v0.2: Re-apply priority after re-arming the timer.
   clockTimer.priority(0);
 
@@ -883,7 +975,7 @@ void handleTempoEncoder() {
     updateShiftDelays();
 
     if (clockRunning) {
-      clockTimer.update(pulseIntervalMicros);  // adjust rate without restarting
+      clockTimer.update(pulseIntervalMicrosF);  // adjust rate without restarting
     }
 
     displayNeedsUpdate = true;
@@ -1007,15 +1099,21 @@ void handleNavButton() {
   bool pressed = (digitalRead(NAV_BTN_PIN) == LOW);
   uint32_t now = millis();
 
+  // navButtonHeld is the debounced state. Ignore no-change polls, and ignore
+  // any edge arriving while the contacts are still bouncing — otherwise a
+  // single press can register as press-release-press and skip a menu level.
+  if (pressed == navButtonHeld) return;
+  if ((now - navLastEdgeTime) < BTN_DEBOUNCE_MS) return;
+  navLastEdgeTime = now;
+
   // Button just pressed — record time.
-  if (pressed && !navButtonHeld) {
+  if (pressed) {
     navPressTime  = now;
     navButtonHeld = true;
     navLastState  = LOW;
-  }
 
-  // Button just released — determine short vs long press.
-  if (!pressed && navButtonHeld) {
+  } else {
+    // Button just released — determine short vs long press.
     uint32_t heldFor = now - navPressTime;
     navButtonHeld    = false;
     navLastState     = HIGH;
@@ -1066,16 +1164,23 @@ void handleStartStopButton() {
   bool state   = digitalRead(BTN_START_STOP);
   uint32_t now = millis();
 
-  if (state == LOW && btnLastState == HIGH) {  // falling edge = press
-    if (btnPendingSingle && (now - lastPressTime < DOUBLE_PRESS_MS)) {
-      // Second press within window — cancel the pending single-press and resync.
-      btnPendingSingle = false;
-      if (clockRunning) resyncClock();
-    } else {
-      // First press — defer action until the double-press window expires.
-      btnPendingSingle = true;
+  // Only act on a state change that has settled — bounce edges are ignored,
+  // and btnLastState latches only on an accepted edge so the guard holds.
+  if (state != btnLastState && (now - btnLastEdgeTime) >= BTN_DEBOUNCE_MS) {
+    btnLastEdgeTime = now;
+    btnLastState    = state;
+
+    if (state == LOW) {  // falling edge = press
+      if (btnPendingSingle && (now - lastPressTime < DOUBLE_PRESS_MS)) {
+        // Second press within window — cancel the pending single-press and resync.
+        btnPendingSingle = false;
+        if (clockRunning) resyncClock();
+      } else {
+        // First press — defer action until the double-press window expires.
+        btnPendingSingle = true;
+      }
+      lastPressTime = now;
     }
-    lastPressTime = now;
   }
 
   // Single-press window expired: now safe to act on it as a plain toggle.
@@ -1084,8 +1189,6 @@ void handleStartStopButton() {
     if (clockRunning) stopClock();
     else              startClock();
   }
-
-  btnLastState = state;
 }
 
 
@@ -1172,7 +1275,7 @@ void handleTapTempo() {
     updateBPM(newBPM);
     updateSwingDelays();
     updateShiftDelays();
-    if (clockRunning) clockTimer.update(pulseIntervalMicros);
+    if (clockRunning) clockTimer.update(pulseIntervalMicrosF);
     displayNeedsUpdate = true;
   }
 }
@@ -1195,7 +1298,7 @@ void handleSpeedSwitch() {
     updateBPM(bpm);  // recalculates pulseIntervalMicros and quarterNoteMicros
     updateSwingDelays();
     updateShiftDelays();
-    if (clockRunning) clockTimer.update(pulseIntervalMicros);
+    if (clockRunning) clockTimer.update(pulseIntervalMicrosF);
     displayNeedsUpdate = true;
   }
 }
@@ -1261,7 +1364,7 @@ void printShiftValue(int8_t shiftHalfMs) {
 
 void updateDisplay() {
   display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
+  display.setTextColor(SH110X_WHITE);
 
   float effectiveBPM = bpm * speedMultiplier;
 
@@ -1284,7 +1387,7 @@ void updateDisplay() {
   if (speedMultiplier == 0.5f)      display.print(" x0.5");
   else if (speedMultiplier == 2.0f) display.print(" x2");
 
-  display.drawLine(0, 27, 127, 27, SSD1306_WHITE);  // separator line
+  display.drawLine(0, 27, 127, 27, SH110X_WHITE);  // separator line
 
   // ── Level-specific content ─────────────────────────────────────────────────
 
@@ -1480,7 +1583,7 @@ void setup() {
 
   // Initialise OLED display
   // If display.begin() fails, the sketch continues — LEDs and MIDI still work.
-  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+  if (!display.begin(0x3C, true)) {
     // Display not found — continue without it
   }
   display.clearDisplay();
