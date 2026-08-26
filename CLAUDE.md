@@ -18,7 +18,8 @@ see README.md for the feature list this firmware implements.
 
 USB type "Serial + MIDI" is required — the firmware sends USB MIDI clock.
 Installed toolchain: arduino-cli (Homebrew), teensy:avr core, libraries
-Adafruit SSD1306 / GFX / NeoPixel.
+Adafruit SH110X / GFX / NeoPixel. (The display is an SH1106 driven by
+Adafruit_SH110X — SSD1306 is installed but unused.)
 
 ## Working rules
 
@@ -37,6 +38,11 @@ Adafruit SSD1306 / GFX / NeoPixel.
 - README.md speaks for the finished instrument; its Prototype Status section
   and the "Known deferred work" list below describe the same gap from two
   sides. When a deferred item ships, update both in the same change.
+- Don't flash any device unless asked. Say whether a flash is actually needed.
+- **The CrowPanel belongs to Ableton Navigator, not Clocktopus.** It has been
+  discussed as a possible companion display over UART, but nothing is built: no
+  CrowPanel code or reference appears anywhere in this repo's tracked files.
+  Never describe the CrowPanel as Clocktopus hardware.
 
 ## Values (full context in private/)
 
@@ -69,7 +75,15 @@ These shape code, docs, naming, and hardware decisions — not just marketing co
   ~240µs — the largest remaining jitter source)
 - MIDI clock swing (needs per-port event queue — see v0.4 changelog)
 - Tap tempo function exists but no button is wired to call it
-- First hardware flash 2026-07-07 19:27 CEST (bare Teensy 4.1): USB MIDI clock and
-  Start/Stop/Resync verified in a MIDI monitor. Everything else (OLED,
-  encoders, buttons, NeoPixels, DIN MIDI, CV) is unwired and untested;
-  remaining smoke test = shift on port 1 while watching the overview markers
+- Hardware verified 2026-08-27 (v0.5, bare Teensy 4.1 + OLED on a breadboard,
+  USB powered): USB MIDI clock, Start/Stop/Resync, debounced start button
+  (pin 20 jumpered to GND), and the 1.3" SH1106 OLED on pins 18/19 at 0x3C.
+  Ableton Live follows tempo over USB MIDI with Sync enabled and EXT engaged.
+- Still unwired and untested: encoders, NeoPixels, DIN MIDI, CV outs.
+  Remaining smoke test = shift on port 1 while watching the overview markers.
+- Two v0.5 timing fixes remain unproven and cannot be proven by DAW sync alone:
+  tempo accuracy (120.000 vs 120.0077 BPM) needs an independent reference,
+  since a follower DAW tracks a wrong tempo as faithfully as a right one;
+  the USB/DIN phase pre-load needs a DIN port wired to compare both outputs.
+- Wiring a DIN port hits the open pin 20 / Serial5 TX conflict — the start
+  button currently occupies Serial5's TX pin and must move (e.g. to 22).
