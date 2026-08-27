@@ -75,15 +75,21 @@ These shape code, docs, naming, and hardware decisions — not just marketing co
   ~240µs — the largest remaining jitter source)
 - MIDI clock swing (needs per-port event queue — see v0.4 changelog)
 - Tap tempo function exists but no button is wired to call it
-- Hardware verified 2026-08-27 (v0.5, bare Teensy 4.1 + OLED on a breadboard,
-  USB powered): USB MIDI clock, Start/Stop/Resync, debounced start button
-  (pin 20 jumpered to GND), and the 1.3" SH1106 OLED on pins 18/19 at 0x3C.
-  Ableton Live follows tempo over USB MIDI with Sync enabled and EXT engaged.
-- Still unwired and untested: encoders, NeoPixels, DIN MIDI, CV outs.
-  Remaining smoke test = shift on port 1 while watching the overview markers.
-- Two v0.5 timing fixes remain unproven and cannot be proven by DAW sync alone:
-  tempo accuracy (120.000 vs 120.0077 BPM) needs an independent reference,
-  since a follower DAW tracks a wrong tempo as faithfully as a right one;
-  the USB/DIN phase pre-load needs a DIN port wired to compare both outputs.
-- Wiring a DIN port hits the open pin 20 / Serial5 TX conflict — the start
-  button currently occupies Serial5's TX pin and must move (e.g. to 22).
+- Hardware verified 2026-08-27 (v0.6, breadboard, USB powered): USB MIDI clock,
+  Start/Stop/Resync, the 1.3" SH1106 OLED on pins 18/19 at 0x3C, Ableton Live
+  following tempo over USB MIDI, MIDI port 1 clocking an external synth over
+  TRS, and nav encoder navigation on pins 32/33 + button on 23.
+- MIDI out needs no level shifter: direct 3.3V drive (33R to tip, 3.3V through
+  10R to ring, GND to sleeve, TRS Type A) drives an opto-isolated input fine.
+- Still unwired and untested: tempo encoder, NeoPixels, CV outs, MIDI ports 2-8.
+  Remaining smoke test = shift on port 1 while watching the overview markers —
+  now possible for the first time, since OLED + nav + port 1 all work.
+- Two v0.5 timing fixes remain unproven and cannot be proven by DAW sync or a
+  synth: tempo accuracy (120.000 vs 120.0077 BPM) needs an independent
+  reference, since a follower tracks a wrong tempo as faithfully as a right
+  one; the USB/DIN phase pre-load needs both streams timestamped side by side.
+  Both are blocked on a USB-MIDI interface with a DIN input.
+- The pin 20 / Serial5 TX conflict only affects MIDI port 5, not DIN wiring in
+  general — port 1 is Serial1, TX on pin 1, no conflict.
+- Use a real momentary button on pin 20, not a bare jumper: pulling a jumper
+  chatters and toggles run/stop repeatedly. BTN_DEBOUNCE_MS cannot help.

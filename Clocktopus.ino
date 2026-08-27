@@ -9,8 +9,8 @@
 //      (requires Tools > USB Type > Serial + MIDI)
 //    - 8x Eurorack CV outputs via GPIO + 74AHCT125 level shifter
 //    - 8x WS2812B NeoPixel LEDs (one per port)
-//    - Encoder 1 (pins 14,15) — Tempo (non-detented / smooth)
-//    - Encoder 2 (pins 16,17) — Port config navigation (detented with push button)
+//    - Encoder 1 (pins 30,31) — Tempo (non-detented / smooth)
+//    - Encoder 2 (pins 32,33) — Port config navigation (detented with push button)
 //    - Nav encoder button (pin 23)
 //    - Start/Stop button (pin 20)
 //    - Start/Stop button bicolour LED: green (pin 25, PWM), red (pin 28, PWM)
@@ -30,6 +30,24 @@
 
 // ============================================================================
 //  CHANGELOG
+//
+//  v0.6  — 2026-08-27
+//    FIXED   Both encoders were dead on every build, and always had been.
+//            initMIDIPorts() calls begin(31250) on all 8 UARTs unconditionally
+//            — it never checks ports[i].type — and it is the first call in
+//            setup(). Serial3 owns pins 15/14 and Serial4 owns pins 16/17
+//            (HardwareSerial3.cpp / HardwareSerial4.cpp in the core), and
+//            HardwareSerial::begin() rewrites the pin mux for both RX and TX
+//            regardless of whether anything is connected. The Encoder objects
+//            are globals, so their INPUT_PULLUP setup ran before setup() and
+//            was overwritten moments later. Symptom on hardware: the nav
+//            encoder's push button works (pin 23, not a UART pin) while
+//            rotation does nothing at all.
+//            Encoders moved to pins no UART claims — tempo 14,15 → 30,31 and
+//            nav 16,17 → 32,33. Chosen so they survive a full 8-port build
+//            rather than needing a second remap later.
+//            Found by hardware test, not by compiling: the sketch built clean
+//            in this state from v0.1 onward.
 //
 //  v0.5  — 2026-07-21
 //    Timing review against the E-RM jitter report and multiclock manual.
@@ -262,8 +280,10 @@ const uint8_t BTN_LED_GREEN = 25;   // PWM pin — green LED anode
 const uint8_t BTN_LED_RED   = 28;   // PWM pin — red LED anode (was 26 — not PWM)
 
 // Encoder pins (must be interrupt-capable pins on Teensy 4.1)
-// Encoder 1: Tempo  — pins 14, 15
-// Encoder 2: Nav    — pins 16, 17  (NOT 18,19 — those are SDA/SCL for the OLED's I2C bus)
+// Encoder 1: Tempo  — pins 30, 31
+// Encoder 2: Nav    — pins 32, 33
+// Pins 30–33 are claimed by no UART, so these survive a full 8-port build.
+// Do NOT use 14/15/16/17 (Serial3/Serial4), and not 18/19 (I2C for the OLED).
 //
 // ⚠ FULL-BUILD PIN EXPANSION NOTE:
 //   When all 8 MIDI UARTs are active, additional pin conflicts arise.
@@ -272,15 +292,20 @@ const uint8_t BTN_LED_RED   = 28;   // PWM pin — red LED anode (was 26 — not
 //     Serial4 RX=16 TX=17 |  Serial5 RX=21 TX=20  |  Serial6 RX=25 TX=24
 //     Serial7 RX=28 TX=29 |  Serial8 RX=34 TX=35
 //   Impact on this sketch when all 8 ports are active:
-//     - Encoder 1 (14,15) conflicts with Serial3 → remap to free pins (e.g. 12, 33)
-//     - Encoder 2 (16,17) conflicts with Serial4 → remap (e.g. 30, 31)
+//     - Encoders: resolved in v0.6 — moved to 30,31 and 32,33, which no UART
+//       claims. Nothing further to do for them.
 //     - CV_PINS[6]=8 conflicts with Serial2 TX → change CV array (skip 7,8)
 //     - BTN_START_STOP=20 conflicts with Serial5 TX → remap (e.g. 22)
-//     - LED_PIN=24 conflicts with Serial6 TX → remap (e.g. 33)
-//     - BTN_LED_GREEN=25 conflicts with Serial6 RX → remap (e.g. 33 — must be PWM; 26 is NOT)
+//     - LED_PIN=24 conflicts with Serial6 TX → remap (NOT 33 — taken by the
+//       nav encoder since v0.6; needs allocating against the final pinout)
+//     - BTN_LED_GREEN=25 conflicts with Serial6 RX → remap (NOT 33, see above;
+//       must be PWM-capable — 26 is NOT)
 //     - BTN_LED_RED=28 conflicts with Serial7 RX → remap (e.g. 36 — must be PWM)
-//   These conflicts ONLY affect you when you wire up Serial3–8.
-//   For the TEST STAGE (Serial1 + Serial2 only), all pins above are safe.
+//   ⚠ These conflicts are NOT conditional on wiring anything up. initMIDIPorts()
+//   calls begin() on all 8 UARTs unconditionally, and begin() reassigns the pin
+//   mux for both RX and TX whether or not a cable is attached. An earlier version
+//   of this note claimed the conflicts only mattered once Serial3–8 were wired;
+//   that was wrong, and it hid the dead-encoder bug fixed in v0.6.
 
 
 // ============================================================================
@@ -584,8 +609,8 @@ uint8_t  tapIndex    = 0;
 
 IntervalTimer clockTimer;
 
-Encoder tempoEncoder(14, 15);  // Encoder 1: Tempo
-Encoder navEncoder(16, 17);    // Encoder 2: Port config navigation (16,17 — 18,19 are I2C)
+Encoder tempoEncoder(30, 31);  // Encoder 1: Tempo
+Encoder navEncoder(32, 33);    // Encoder 2: Port config navigation
 
 long lastTempoEncoderPos = 0;
 long lastNavEncoderPos   = 0;
