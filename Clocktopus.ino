@@ -243,11 +243,9 @@
 //  INCLUDES
 // ============================================================================
 
-#include <Arduino.h>
 #include <IntervalTimer.h>
 #include <Encoder.h>
 #include <Wire.h>
-#include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
 #include <Adafruit_NeoPixel.h>
 
@@ -449,6 +447,8 @@ const uint16_t divisionTicks[NUM_DIVISIONS] = {
 // run at the wrong tempo (e.g. "Quarter" = 1/24th of the dialled BPM).
 const uint8_t DIV_MIDI24 = 6;  // index into divisionTicks[] / divisionNames[]
 
+const char* paramNames[PARAM_COUNT] = {"Type", "Division", "Shift", "Swing", "Enabled"};
+
 
 // ============================================================================
 //  GLOBAL STATE — CLOCK
@@ -569,7 +569,6 @@ volatile uint32_t ledFlashTime[8] = {0};
 //    has a faint glow even at the trough of the cycle.
 // ============================================================================
 
-float    btnLedPhase       = 0.0f;
 uint32_t btnLedCycleStart  = 0;
 
 // Duration of one quarter-note in microseconds — updated whenever BPM changes.
@@ -590,18 +589,12 @@ uint32_t lastPressTime     = 0;
 bool     btnPendingSingle  = false;  // single-press deferred until double-press window expires
 
 // Nav encoder button
-bool     navLastState     = HIGH;
 uint32_t navLastEdgeTime  = 0;       // last accepted edge — debounce reference
 uint32_t navPressTime     = 0;
 bool     navButtonHeld    = false;
 // Set when an encoder is turned while the button is held (coarse-adjust
 // modifier). The release is then swallowed instead of navigating the menu.
 bool     navButtonUsedAsModifier = false;
-
-// Tap tempo
-uint32_t tapTimes[4] = {0};
-uint8_t  tapIndex    = 0;
-
 
 // ============================================================================
 //  HARDWARE OBJECTS
@@ -643,6 +636,10 @@ void updateBPM(float newBPM) {
   // Quarter-note duration for the button LED breathing cycle:
   //   60,000,000 µs/min  ÷  (BPM × speedMultiplier)
   quarterNoteMicros = (uint32_t)(60000000.0f / (bpm * speedMultiplier));
+  // Both delay tables are derived from pulseIntervalMicros — recompute here so
+  // no caller can change tempo and leave them stale.
+  updateSwingDelays();
+  updateShiftDelays();
 }
 
 // Recompute swing delay for every port.
@@ -996,8 +993,6 @@ void handleTempoEncoder() {
     if (coarse) navButtonUsedAsModifier = true;  // don't navigate on release
     float increment = coarse ? 5.0f : 0.5f;
     updateBPM(bpm + (steps * increment));
-    updateSwingDelays();
-    updateShiftDelays();
 
     if (clockRunning) {
       clockTimer.update(pulseIntervalMicrosF);  // adjust rate without restarting
@@ -1135,13 +1130,11 @@ void handleNavButton() {
   if (pressed) {
     navPressTime  = now;
     navButtonHeld = true;
-    navLastState  = LOW;
 
   } else {
     // Button just released — determine short vs long press.
     uint32_t heldFor = now - navPressTime;
     navButtonHeld    = false;
-    navLastState     = HIGH;
 
     if (navButtonUsedAsModifier) {
       // Button was held as a coarse-adjust modifier while an encoder turned —
@@ -1252,7 +1245,7 @@ void updateButtonLED() {
     }
 
     // Phase 0.0 (beat start) → 1.0 (beat end)
-    btnLedPhase = (float)elapsed / (float)quarterNoteMicros;
+    float btnLedPhase = (float)elapsed / (float)quarterNoteMicros;
 
     // sin(0) = 0, sin(π/2) = 1, sin(π) = 0 → one smooth arch per beat
     float sinVal = sinf(btnLedPhase * 3.14159265f);
@@ -1271,37 +1264,6 @@ void updateButtonLED() {
 
     // Reset so breathing starts cleanly from the beginning on next startClock().
     btnLedCycleStart = micros();
-    btnLedPhase      = 0.0f;
-  }
-}
-
-
-// ============================================================================
-//  TAP TEMPO
-//  Connect a dedicated tap button and call this from loop() when it is pressed.
-//  Averages the last 3 tap intervals for stability.
-//  (Optional — wire to a second button or use a long-press on the start/stop button)
-// ============================================================================
-
-void handleTapTempo() {
-  uint32_t now = millis();
-  tapTimes[tapIndex % 4] = now;
-  tapIndex++;
-
-  if (tapIndex >= 4) {
-    uint32_t totalInterval = 0;
-    for (int i = 0; i < 3; i++) {
-      uint8_t older = (tapIndex - 4 + i) % 4;
-      uint8_t newer = (tapIndex - 3 + i) % 4;
-      totalInterval += tapTimes[newer] - tapTimes[older];
-    }
-    float avgInterval = totalInterval / 3.0f;
-    float newBPM      = 60000.0f / avgInterval;
-    updateBPM(newBPM);
-    updateSwingDelays();
-    updateShiftDelays();
-    if (clockRunning) clockTimer.update(pulseIntervalMicrosF);
-    displayNeedsUpdate = true;
   }
 }
 
@@ -1320,9 +1282,7 @@ void handleSpeedSwitch() {
 
   if (newMult != speedMultiplier) {
     speedMultiplier = newMult;
-    updateBPM(bpm);  // recalculates pulseIntervalMicros and quarterNoteMicros
-    updateSwingDelays();
-    updateShiftDelays();
+    updateBPM(bpm);  // also refreshes the swing and shift delay tables
     if (clockRunning) clockTimer.update(pulseIntervalMicrosF);
     displayNeedsUpdate = true;
   }
@@ -1456,8 +1416,6 @@ void updateDisplay() {
     display.print(" - ");
     display.print(ports[selectedPort].type == PORT_MIDI ? "MIDI" : "CV  ");
 
-    const char* paramNames[PARAM_COUNT] = {"Type", "Division", "Shift", "Swing", "Enabled"};
-
     // Five parameters no longer fit under the header on the 64px display —
     // show a 3-row window that scrolls with the selection.
     int firstRow = (int)selectedParam - 1;
@@ -1498,7 +1456,6 @@ void updateDisplay() {
     display.print("PORT ");
     display.print(selectedPort + 1);
 
-    const char* paramNames[PARAM_COUNT] = {"Type", "Division", "Shift", "Swing", "Enabled"};
     display.print(" - ");
     display.print(paramNames[selectedParam]);
 
@@ -1597,8 +1554,6 @@ void setup() {
 
   // Calculate initial timing values
   updateBPM(120.0f);
-  updateSwingDelays();
-  updateShiftDelays();
 
   // Initialise NeoPixel LEDs
   leds.begin();
@@ -1606,11 +1561,9 @@ void setup() {
   leds.clear();
   leds.show();
 
-  // Initialise OLED display
-  // If display.begin() fails, the sketch continues — LEDs and MIDI still work.
-  if (!display.begin(0x3C, true)) {
-    // Display not found — continue without it
-  }
+  // Initialise OLED display. If it isn't found the sketch continues anyway —
+  // LEDs and MIDI still work.
+  display.begin(0x3C, true);
   display.clearDisplay();
   display.display();
   updateDisplay();
