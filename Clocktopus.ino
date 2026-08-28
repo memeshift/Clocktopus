@@ -31,6 +31,19 @@
 // ============================================================================
 //  CHANGELOG
 //
+//  v0.8  — 2026-08-29
+//    Tempo encoder step sizes changed on request. Plain turn is now 1 BPM
+//    (was 0.5). Holding the nav encoder button is now FINE at 0.1 BPM,
+//    where it used to be COARSE at 5 BPM — the modifier's meaning is
+//    inverted for tempo.
+//
+//    Steps are relative, not snapped: from 120.3 a plain turn gives 121.3,
+//    not 121.0. Change the arithmetic in handleTempoEncoder() if snapping
+//    to whole BPM is wanted instead.
+//
+//    Note the nav button still means COARSE when held while editing Shift
+//    (0.5ms steps become 5ms). Same button, opposite sense, two contexts.
+//
 //  v0.7  — 2026-08-28
 //    All 8 MIDI ports can now transmit. Three UART TX pins were being taken
 //    back by later calls in setup(): pin 8 by initCVPins(), pin 20 by
@@ -623,8 +636,9 @@ bool     btnPendingSingle  = false;  // single-press deferred until double-press
 uint32_t navLastEdgeTime  = 0;       // last accepted edge — debounce reference
 uint32_t navPressTime     = 0;
 bool     navButtonHeld    = false;
-// Set when an encoder is turned while the button is held (coarse-adjust
-// modifier). The release is then swallowed instead of navigating the menu.
+// Set when an encoder is turned while the button is held (step-size modifier:
+// fine on tempo, coarse on shift). The release is then swallowed instead of
+// navigating the menu.
 bool     navButtonUsedAsModifier = false;
 
 // ============================================================================
@@ -1018,11 +1032,11 @@ void handleTempoEncoder() {
     int steps = delta / 4;
     lastTempoEncoderPos = pos;
 
-    // Hold nav encoder button while turning tempo encoder for coarse adjust:
-    // 5 BPM per step instead of 0.5 BPM.
-    bool coarse = (digitalRead(NAV_BTN_PIN) == LOW);
-    if (coarse) navButtonUsedAsModifier = true;  // don't navigate on release
-    float increment = coarse ? 5.0f : 0.5f;
+    // Hold nav encoder button while turning tempo encoder for fine adjust:
+    // 0.1 BPM per step instead of 1 BPM.
+    bool fine = (digitalRead(NAV_BTN_PIN) == LOW);
+    if (fine) navButtonUsedAsModifier = true;  // don't navigate on release
+    float increment = fine ? 0.1f : 1.0f;
     updateBPM(bpm + (steps * increment));
 
     if (clockRunning) {
@@ -1124,7 +1138,7 @@ void handleNavEncoder() {
     int steps = delta / 4;
     lastNavEncoderPos = pos;
 
-    // Turning while the button is held = coarse-adjust modifier in use;
+    // Turning while the button is held = step-size modifier in use;
     // the release must not be treated as a navigation press.
     if (digitalRead(NAV_BTN_PIN) == LOW) navButtonUsedAsModifier = true;
 
@@ -1168,7 +1182,7 @@ void handleNavButton() {
     navButtonHeld    = false;
 
     if (navButtonUsedAsModifier) {
-      // Button was held as a coarse-adjust modifier while an encoder turned —
+      // Button was held as a step-size modifier while an encoder turned —
       // that's not a navigation press. Swallow it.
       navButtonUsedAsModifier = false;
 

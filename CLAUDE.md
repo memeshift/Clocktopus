@@ -91,7 +91,14 @@ These shape code, docs, naming, and hardware decisions — not just marketing co
   the way 220R/220R is the 5V one. An earlier version of this line said 10R on
   the ring; no such part was ever ordered and 10R is not a MIDI value. If a
   bench measurement ever disagrees with this, measure before editing.
-- Still unwired and untested: tempo encoder, NeoPixels, CV outs, MIDI ports 2-8.
+- v0.8 (2026-08-29) changes tempo encoder step sizes: plain turn is 1 BPM (was
+  0.5), and holding the nav button is now FINE at 0.1 BPM where it used to be
+  COARSE at 5. Steps are relative, not snapped — from 120.3 a turn gives 121.3.
+  Flashed and confirmed working on the bench. Note the nav button still means
+  COARSE when held while editing Shift; same button, opposite sense.
+- Tempo encoder verified 2026-08-29 on pins 30/31 (PEC11L, no switch, 3 pins:
+  A/COM/B with COM to GND). Both encoders now work.
+- Still unwired and untested: NeoPixels, CV outs, MIDI ports 2-8.
   Remaining smoke test = shift on port 1 while watching the overview markers —
   now possible for the first time, since OLED + nav + port 1 all work.
 - Two v0.5 timing fixes remain unproven and cannot be proven by DAW sync or a
