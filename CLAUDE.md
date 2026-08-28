@@ -80,7 +80,11 @@ These shape code, docs, naming, and hardware decisions — not just marketing co
   following tempo over USB MIDI, MIDI port 1 clocking an external synth over
   TRS, and nav encoder navigation on pins 32/33 + button on 23.
 - MIDI out needs no level shifter: direct 3.3V drive (33R to tip, 3.3V through
-  10R to ring, GND to sleeve, TRS Type A) drives an opto-isolated input fine.
+  a second 33R to ring, GND to sleeve, TRS Type A) drives an opto-isolated
+  input fine. Both resistors are 33R — that is the standard 3.3V MIDI pair,
+  the way 220R/220R is the 5V one. An earlier version of this line said 10R on
+  the ring; no such part was ever ordered and 10R is not a MIDI value. If a
+  bench measurement ever disagrees with this, measure before editing.
 - Still unwired and untested: tempo encoder, NeoPixels, CV outs, MIDI ports 2-8.
   Remaining smoke test = shift on port 1 while watching the overview markers —
   now possible for the first time, since OLED + nav + port 1 all work.
