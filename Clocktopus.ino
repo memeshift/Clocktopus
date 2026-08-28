@@ -31,6 +31,26 @@
 // ============================================================================
 //  CHANGELOG
 //
+//  v0.7  — 2026-08-28
+//    All 8 MIDI ports can now transmit. Three UART TX pins were being taken
+//    back by later calls in setup(): pin 8 by initCVPins(), pin 20 by
+//    pinMode(BTN_START_STOP), pin 24 by leds.begin(). Each port still wrote
+//    happily into a UART whose output pin had been re-muxed to GPIO, so the
+//    failure was silent — no error, buffer drained, nothing on the wire.
+//
+//    Three constants moved, nothing else:
+//      CV_PINS         {2,3,4,5,6,7,8,9} → {2,3,4,5,6,9,10,11}
+//      BTN_START_STOP  20 → 26
+//      LED_PIN         24 → 27
+//
+//    Dropping pin 7 as well as pin 8 was not strictly needed for transmit —
+//    pin 7 is Serial2 RX and we never receive. It removes a separate latent
+//    trap: switching port 2 to MIDI at runtime calls Serial2.begin(), which
+//    would have reclaimed pin 7 from a live CV port.
+//
+//    NOT bench tested. Derived from the source and the Teensy core, same as
+//    the v0.6 diagnosis. Ports 2-8 have never had a jack attached.
+//
 //  v0.6  — 2026-08-27
 //    FIXED   Both encoders were dead on every build, and always had been.
 //            initMIDIPorts() calls begin(31250) on all 8 UARTs unconditionally
@@ -255,16 +275,22 @@
 // ============================================================================
 
 // Eurorack CV output pins (connect via 74AHCT125 level shifter for 5V output)
-const uint8_t CV_PINS[8] = {2, 3, 4, 5, 6, 7, 8, 9};
+// v0.7: pins 7 and 8 dropped — they are Serial2 RX/TX. Keeping CV off every
+// UART pin is what lets all 8 MIDI ports transmit, and it also makes runtime
+// port-type switching safe: Serial2.begin() can no longer steal a live CV pin.
+const uint8_t CV_PINS[8] = {2, 3, 4, 5, 6, 9, 10, 11};
 
 // Button and switch pins
-const uint8_t BTN_START_STOP = 20;   // Start/Stop/Resync button
+const uint8_t BTN_START_STOP = 26;   // Start/Stop/Resync button (v0.7: was 20 = Serial5 TX)
 const uint8_t SW_HALF        = 21;   // Speed toggle: half speed
 const uint8_t SW_DOUBLE      = 22;   // Speed toggle: double speed
 const uint8_t NAV_BTN_PIN    = 23;   // Nav encoder push button
 
 // NeoPixel LED strip (all 8 LEDs on one pin)
-const uint8_t LED_PIN   = 24;
+// v0.7: was 24, which is Serial6 TX. Note this rules out the deferred
+// WS2812Serial optimisation — that library drives the strip from a hardware
+// serial TX pin, and with 8 MIDI ports there is no spare UART to give it.
+const uint8_t LED_PIN   = 27;
 const uint8_t LED_COUNT = 8;
 
 // Start/Stop button bicolour LED pins
@@ -290,15 +316,20 @@ const uint8_t BTN_LED_RED   = 28;   // PWM pin — red LED anode (was 26 — not
 //     Serial4 RX=16 TX=17 |  Serial5 RX=21 TX=20  |  Serial6 RX=25 TX=24
 //     Serial7 RX=28 TX=29 |  Serial8 RX=34 TX=35
 //   Impact on this sketch when all 8 ports are active:
-//     - Encoders: resolved in v0.6 — moved to 30,31 and 32,33, which no UART
-//       claims. Nothing further to do for them.
-//     - CV_PINS[6]=8 conflicts with Serial2 TX → change CV array (skip 7,8)
-//     - BTN_START_STOP=20 conflicts with Serial5 TX → remap (e.g. 22)
-//     - LED_PIN=24 conflicts with Serial6 TX → remap (NOT 33 — taken by the
-//       nav encoder since v0.6; needs allocating against the final pinout)
-//     - BTN_LED_GREEN=25 conflicts with Serial6 RX → remap (NOT 33, see above;
-//       must be PWM-capable — 26 is NOT)
-//     - BTN_LED_RED=28 conflicts with Serial7 RX → remap (e.g. 36 — must be PWM)
+//   Status after v0.7: every UART TX pin is now free, so all 8 MIDI ports can
+//   transmit. Resolved:
+//     - Encoders: v0.6 — moved to 30,31 and 32,33, which no UART claims.
+//     - CV_PINS: v0.7 — now {2,3,4,5,6,9,10,11}, clear of pins 7 and 8.
+//     - BTN_START_STOP: v0.7 — 20 → 26.
+//     - LED_PIN: v0.7 — 24 → 27.
+//   Still overlapping, deliberately and harmlessly — these are UART RX pins,
+//   and nothing in this firmware ever receives MIDI:
+//     - SW_HALF=21 sits on Serial5 RX
+//     - BTN_LED_GREEN=25 sits on Serial6 RX
+//     - BTN_LED_RED=28 sits on Serial7 RX
+//   pinMode() in setup() runs after initMIDIPorts(), so these three win their
+//   pins and the matching UART loses only its receive line. Adding MIDI input
+//   on ports 5, 6 or 7 would mean remapping them first.
 //   ⚠ These conflicts are NOT conditional on wiring anything up. initMIDIPorts()
 //   calls begin() on all 8 UARTs unconditionally, and begin() reassigns the pin
 //   mux for both RX and TX whether or not a cable is attached. An earlier version

@@ -147,18 +147,19 @@ and Korg Volca series (via Volca preset).
 
 ## Prototype Status
 
-This README describes the finished Clocktopus. The firmware is at v0.6,
+This README describes the finished Clocktopus. The firmware is at v0.7,
 running on a breadboard prototype: a Teensy 4.1 with the 1.3" OLED, the
 navigation encoder, and one TRS MIDI output attached, powered over USB. As of
 27 August 2026 it delivers a steady 24 PPQN USB MIDI clock with Start/Stop/
 Resync transport, drives the display, syncs Ableton Live as a follower over
 USB MIDI, clocks an external synth from MIDI port 1, and navigates its own
 menus. The tempo encoder, NeoPixels, CV outputs, and MIDI ports 2-8 are not
-yet wired and remain untested on hardware. A few listed features are still in
-development: MIDI clock swing, tap tempo (implemented in firmware but not yet
-wired to a button), and the hardware-timer pulse scheduler that will deliver
-the final jitter target on shifted and swung outputs.
+yet wired and remain untested on hardware. v0.7 reassigns pins so that all
+eight MIDI ports can transmit, but only port 1 has ever had a jack on it. A
+few listed features are still in development: MIDI clock swing, tap tempo, and
+the hardware-timer pulse scheduler that will deliver the final jitter target
+on shifted and swung outputs.
 
 ---
 
-*Firmware: v0.6 — Platform: Teensy 4.1 — open hardware*
+*Firmware: v0.7 — Platform: Teensy 4.1 — open hardware*

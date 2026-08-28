@@ -72,9 +72,15 @@ These shape code, docs, naming, and hardware decisions — not just marketing co
   jitter on shifted/swung pulses during OLED redraws; also fixes CV pulse-off
   stretching)
 - WS2812Serial instead of Adafruit_NeoPixel (leds.show() disables interrupts
-  ~240µs — the largest remaining jitter source)
+  ~240µs — the largest remaining jitter source). BLOCKED as of v0.7: that
+  library drives the strip from a hardware serial TX pin, and all 8 UARTs are
+  now committed to MIDI. Reviving it means giving up a MIDI port.
 - MIDI clock swing (needs per-port event queue — see v0.4 changelog)
-- Tap tempo function exists but no button is wired to call it
+- v0.7 (2026-08-28) frees every UART TX pin, so all 8 MIDI ports can transmit:
+  CV_PINS {2,3,4,5,6,7,8,9} → {2,3,4,5,6,9,10,11}, BTN_START_STOP 20 → 26,
+  LED_PIN 24 → 27. Compiled and flashed, NOT bench tested — ports 2-8 have
+  never had a jack attached. Pins 21, 25 and 28 still sit on Serial5/6/7 RX;
+  harmless while nothing receives MIDI.
 - Hardware verified 2026-08-27 (v0.6, breadboard, USB powered): USB MIDI clock,
   Start/Stop/Resync, the 1.3" SH1106 OLED on pins 18/19 at 0x3C, Ableton Live
   following tempo over USB MIDI, MIDI port 1 clocking an external synth over
