@@ -98,7 +98,27 @@ These shape code, docs, naming, and hardware decisions — not just marketing co
   COARSE when held while editing Shift; same button, opposite sense.
 - Tempo encoder verified 2026-08-29 on pins 30/31 (PEC11L, no switch, 3 pins:
   A/COM/B with COM to GND). Both encoders now work.
-- Still unwired and untested: NeoPixels, CV outs, MIDI ports 2-8.
+- v0.9-v0.11 (2026-08-29), all flashed and bench-tested together: parameter
+  menu clamps instead of wrapping; mute moved from a menu item to a long-press
+  on the overview with muted ports blinking; muting a MIDI port sends it STOP
+  and unmuting sends CONTINUE, with the port's counters reset on unmute.
+- KNOWN FLAW in the mute gesture: handleTempoEncoder() sets
+  navButtonUsedAsModifier whenever the tempo encoder moves while the nav button
+  is held, and a release with that flag set is swallowed. The tempo encoder is
+  non-detented, so a resting hand can silently cancel a mute long-press. The
+  port then stays muted and stop/start cannot revive it, because a muted port
+  gets no START. Left in deliberately — every fix guesses at intent, since
+  hold-and-turn and hold-and-release begin identically.
+- Unmute does not realign a port to the others; it cannot for whole and half
+  notes, since internalTickCount wraps every quarter note. Resync fixes it.
+- The button on the Teensy is a PROGRAM button, not a reset. Pressing it drops
+  the board into the bootloader and stops the sketch. Power-cycle USB to reboot.
+- A flash is only proven when /dev/cu.usbmodem* reappears. arduino-cli's upload
+  prints "New upload port" and exits 0 whether or not the flash landed.
+- Still unwired and untested: NeoPixels, CV outs, MIDI ports 2-8. Port 1 now
+  runs into a real Thonkiconn jack rather than clip leads (33R to tip, 33R from
+  3.3V to ring, GND to sleeve); the v0.7 remap that frees ports 2-8 remains
+  reasoned from the source, never measured.
   Remaining smoke test = shift on port 1 while watching the overview markers —
   now possible for the first time, since OLED + nav + port 1 all work.
 - Two v0.5 timing fixes remain unproven and cannot be proven by DAW sync or a

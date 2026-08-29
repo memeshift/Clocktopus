@@ -31,6 +31,67 @@
 // ============================================================================
 //  CHANGELOG
 //
+//  v0.11 — 2026-08-29
+//    Muting a MIDI port now sends it STOP, and unmuting sends CONTINUE. The
+//    follower parks and resumes cleanly instead of hanging on a clock that
+//    stopped arriving. CONTINUE is not optional: a stopped follower ignores
+//    clock until told to resume, so STOP on its own would have muted the port
+//    permanently and made the feature worse than pulling the cable.
+//
+//    Unmuting also resets the port's counters — tick count pre-loaded the way
+//    startClock() does it, swing phase back to the downbeat, any pending
+//    scheduled pulse cleared. Previously the counter was merely frozen, so a
+//    port resumed mid-division at whatever offset it happened to hold.
+//
+//    Both directions write to a UART from loop() while the priority-0 clock
+//    ISR may also be writing to it, which HardwareSerial does not tolerate.
+//    sendRealTimeDirect() masks interrupts around a non-blocking write, and
+//    the `enabled` flag is sequenced so the ISR is never targeting the port
+//    at the moment loop() touches it: cleared before the STOP, set after the
+//    CONTINUE.
+//
+//    Still not addressed: unmute does not realign the port to the others. It
+//    cannot, for whole and half notes — internalTickCount wraps every quarter
+//    note, so there is no bar position to align to. A resync (double-press
+//    start/stop) puts every port back in phase.
+//
+//  v0.10 — 2026-08-29
+//    Mute promoted from a buried menu item to a top-level gesture. Long-press
+//    the nav encoder while the overview is showing to mute or unmute the
+//    selected port; muted ports blink out of the grid at 400ms so the state
+//    is visible without entering anything.
+//
+//    PARAM_ENABLED removed from the parameter menu entirely, so PARAM_COUNT
+//    drops from 5 to 4 and the settings list is Type / Division / Shift /
+//    Swing. The long-press at LEVEL_PORT_SELECT was previously a no-op — it
+//    set currentLevel to the level already showing — so nothing was displaced.
+//
+//    The blink needs periodic redraws that updateDisplay() would never
+//    otherwise perform. loop() forces them, gated on the overview being
+//    visible AND at least one port being muted, because each OLED redraw
+//    costs roughly 6ms of loop latency and that lands as jitter on shifted
+//    and swung pulses. A rig with nothing muted pays nothing.
+//
+//    NOT addressed, still open: muting a MIDI port does not send it STOP, so
+//    the follower is left hanging exactly as if the cable were pulled. Now
+//    that mute is a performance gesture this matters more than it did.
+//    Unmuting also resumes a frozen tick counter rather than resetting it,
+//    so the port returns out of phase until the next resync.
+//
+//  v0.9  — 2026-08-29
+//    Parameter menu no longer wraps. Scrolling past Enabled stays on Enabled,
+//    scrolling past Type stays on Type. Previously the modulo arithmetic
+//    jumped straight from one end of the list to the other.
+//
+//    Also fixes a latent bug in the old expression: adding PARAM_COUNT once
+//    before the modulo only corrects a step of -1. A fast turn producing
+//    several steps at once could go negative and index out of range.
+//    constrain() has no such edge.
+//
+//    Port select at LEVEL_PORT_SELECT still wraps 1-8. Left alone: cycling
+//    ports is a different gesture from scanning a short settings list, and
+//    nothing was reported wrong with it.
+//
 //  v0.8  — 2026-08-29
 //    Tempo encoder step sizes changed on request. Plain turn is now 1 BPM
 //    (was 0.5). Holding the nav encoder button is now FINE at 0.1 BPM,
@@ -384,6 +445,9 @@ const uint16_t BTN_DEBOUNCE_MS = 25;
 // Long press threshold for nav encoder (milliseconds)
 const uint16_t LONG_PRESS_MS = 600;
 
+// Muted ports blink on the overview at this half-period (milliseconds).
+const uint16_t MUTE_BLINK_MS = 400;
+
 // Internal resolution: 96 PPQN (ticks per quarter note).
 // 96 divides cleanly into all standard musical subdivisions:
 //   Whole note  = 96 × 4 = 384 ticks
@@ -413,8 +477,7 @@ enum PortParam {
   PARAM_DIVISION,  // Musical clock division
   PARAM_SHIFT,     // Time shift in ms (offset from the reference grid)
   PARAM_SWING,     // Swing percentage
-  PARAM_ENABLED,   // Port on/off
-  PARAM_COUNT      // Always last — used for wrap-around arithmetic
+  PARAM_COUNT      // Always last — bounds the clamped parameter selection
 };
 
 // Port output type
@@ -491,7 +554,7 @@ const uint16_t divisionTicks[NUM_DIVISIONS] = {
 // run at the wrong tempo (e.g. "Quarter" = 1/24th of the dialled BPM).
 const uint8_t DIV_MIDI24 = 6;  // index into divisionTicks[] / divisionNames[]
 
-const char* paramNames[PARAM_COUNT] = {"Type", "Division", "Shift", "Swing", "Enabled"};
+const char* paramNames[PARAM_COUNT] = {"Type", "Division", "Shift", "Swing"};
 
 
 // ============================================================================
@@ -1118,13 +1181,6 @@ void editCurrentValue(int steps) {
       updateSwingDelays();
       break;
 
-    case PARAM_ENABLED:
-      p.enabled = !p.enabled;
-      if (!p.enabled && p.type == PORT_CV) {
-        digitalWriteFast(CV_PINS[selectedPort], LOW);
-      }
-      break;
-
     default:
       break;
   }
@@ -1148,7 +1204,10 @@ void handleNavEncoder() {
         break;
 
       case LEVEL_PARAM_SELECT:
-        selectedParam = (PortParam)((selectedParam + steps + PARAM_COUNT) % PARAM_COUNT);
+        // Clamped, not wrapped: the list stops at Type and at Enabled so the
+        // selection cannot jump between the two ends of the menu.
+        selectedParam = (PortParam)constrain((int)selectedParam + steps,
+                                             0, PARAM_COUNT - 1);
         break;
 
       case LEVEL_VALUE_EDIT:
@@ -1157,6 +1216,67 @@ void handleNavEncoder() {
     }
 
     displayNeedsUpdate = true;
+  }
+}
+
+// Write one real-time byte to a single port's UART from loop() context.
+// The clock ISR writes to these same UARTs and HardwareSerial is not safe
+// against concurrent writes, so the store is made with interrupts masked —
+// noInterrupts() blocks even the priority-0 clock timer. availableForWrite()
+// keeps it non-blocking, which it must be with interrupts off: a blocking
+// write here would wait for a drain that can never happen.
+void sendRealTimeDirect(uint8_t port, uint8_t msg) {
+  noInterrupts();
+  if (midiPorts[port]->availableForWrite() > 0) {
+    midiPorts[port]->write(msg);
+  }
+  interrupts();
+}
+
+// Mute / unmute one port. Reached by long-pressing the nav encoder while the
+// overview is showing.
+//
+// Muting a MIDI port sends it STOP, so the follower parks instead of waiting
+// on a clock that will never arrive — the hang that simply pulling the cable
+// causes. Unmuting sends CONTINUE, which is the necessary other half: a
+// follower that has been stopped ignores clock until it is told to resume, so
+// STOP without a matching CONTINUE would mute the port permanently.
+//
+// Ordering matters in both directions. On mute, `enabled` is cleared first so
+// the ISR stops targeting the UART before loop() writes to it. On unmute,
+// CONTINUE goes out while `enabled` is still false, and only then is the port
+// opened to the ISR — the same reason resyncClock() sends CONTINUE before it
+// re-arms the timer.
+void togglePortEnabled(uint8_t port) {
+  if (ports[port].enabled) {
+    // ── Muting ────────────────────────────────────────────────────────────
+    ports[port].enabled = false;   // ISR skips this port from its next pass on
+
+    if (ports[port].type == PORT_CV) {
+      digitalWriteFast(CV_PINS[port], LOW);
+      cvPulseOffTime[port] = 0;
+    } else if (clockRunning) {
+      sendRealTimeDirect(port, MIDI_STOP);
+    }
+
+  } else {
+    // ── Unmuting ──────────────────────────────────────────────────────────
+    // Reset rather than resume: a frozen counter would restart mid-division
+    // and leave the port at an arbitrary offset. Pre-loaded the way
+    // startClock() does it, so the port fires on the next tick and a resync
+    // puts it back in step with the others.
+    // Safe to touch these volatiles unguarded — the ISR skips the whole port
+    // while `enabled` is false, which it still is here.
+    portTickCount[port]    = divisionTicks[ports[port].division] - 1;
+    eighthNotePhase[port]  = 0;
+    pulseTriggerTime[port] = 0;
+    cvPulseOffTime[port]   = 0;
+
+    if (ports[port].type == PORT_MIDI && clockRunning) {
+      sendRealTimeDirect(port, MIDI_CONTINUE);
+    }
+
+    ports[port].enabled = true;    // ISR may write to this port again
   }
 }
 
@@ -1187,7 +1307,12 @@ void handleNavButton() {
       navButtonUsedAsModifier = false;
 
     } else if (heldFor >= LONG_PRESS_MS) {
-      if (currentLevel == LEVEL_VALUE_EDIT && selectedParam == PARAM_SHIFT) {
+      if (currentLevel == LEVEL_PORT_SELECT) {
+        // Long press on the overview mutes or unmutes the selected port.
+        // At this level the old "escape to top" behaviour was a no-op — we
+        // are already at the top — so the gesture was free to take.
+        togglePortEnabled(selectedPort);
+      } else if (currentLevel == LEVEL_VALUE_EDIT && selectedParam == PARAM_SHIFT) {
         // Long press while editing Shift: snap the port back onto the grid.
         ports[selectedPort].shift = 0;
         updateShiftDelays();
@@ -1424,7 +1549,12 @@ void updateDisplay() {
   if (currentLevel == LEVEL_PORT_SELECT) {
     // Compact overview: 4 ports per row, 2 rows
     display.setTextSize(1);
+    // Muted ports blink: on the "off" half of the cycle they are simply not
+    // drawn, so the slot goes blank. loop() forces the redraws that make this
+    // move — and only while something is actually muted.
+    bool blinkOff = ((millis() / MUTE_BLINK_MS) & 1) != 0;
     for (int i = 0; i < 8; i++) {
+      if (!ports[i].enabled && blinkOff) continue;
       int col = (i % 4) * 32;
       int row = (i / 4) * 10 + 30;
       display.setCursor(col, row);
@@ -1489,9 +1619,6 @@ void updateDisplay() {
           display.print(ports[selectedPort].swing);
           display.print("%");
           break;
-        case PARAM_ENABLED:
-          display.print(ports[selectedPort].enabled ? "YES" : "NO");
-          break;
       }
     }
 
@@ -1555,9 +1682,6 @@ void updateDisplay() {
         case PARAM_SWING:
           display.print(ports[selectedPort].swing);
           display.print("%");
-          break;
-        case PARAM_ENABLED:
-          display.print(ports[selectedPort].enabled ? "YES" : "NO ");
           break;
 
         default:
@@ -1647,6 +1771,21 @@ void loop() {
   updateUSBMIDI();           // Send ISR-counted clock ticks to USB MIDI
   updateAllLEDs();           // Update NeoPixel LEDs (each port at its own rate)
   updateButtonLED();         // Breathe start/stop button LED in sync with BPM
+
+  // Blinking a muted port needs a periodic redraw, which updateDisplay() would
+  // otherwise never do. Gated on the overview being visible AND something being
+  // muted, so an all-live rig pays nothing — each redraw costs ~6ms of loop
+  // latency, which shows up as jitter on shifted and swung pulses.
+  if (currentLevel == LEVEL_PORT_SELECT) {
+    static uint8_t lastBlinkPhase = 0;
+    uint8_t phase = (millis() / MUTE_BLINK_MS) & 1;
+    if (phase != lastBlinkPhase) {
+      lastBlinkPhase = phase;
+      for (int i = 0; i < 8; i++) {
+        if (!ports[i].enabled) { displayNeedsUpdate = true; break; }
+      }
+    }
+  }
 
   if (displayNeedsUpdate) {
     updateDisplay();         // Refresh OLED only when something has changed

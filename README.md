@@ -93,11 +93,14 @@ Clocktopus soothes the stress of syncing your gear so you can play with other pe
 ## Controls
 
 - **Tempo dial** — large dedicated rotary dial for BPM adjustment;
-  fine (0.5 BPM) and coarse (5 BPM) modes
+  1 BPM per step, or 0.1 BPM while the navigation encoder is held
 - **Navigation encoder** — push-turn encoder for navigating and editing
   all per-port settings without menus getting in the way of playing
 - **Three-level settings hierarchy** — select port → select parameter →
   edit value; long-press returns to the top level from anywhere
+- **Port mute** — long-press on a port in the overview mutes or unmutes it.
+  Muted ports blink on the display, and a muted MIDI port is sent STOP so its
+  follower parks cleanly rather than hanging on a clock that stopped arriving
 
 ---
 
@@ -107,7 +110,9 @@ Clocktopus soothes the stress of syncing your gear so you can play with other pe
 - Time shift
 - Clock division / subdivision
 - Swing amount
-- Enable / disable
+
+Mute is not in this list — it is a top-level gesture on the overview, not a
+menu item.
 
 ---
 
@@ -147,7 +152,7 @@ and Korg Volca series (via Volca preset).
 
 ## Prototype Status
 
-This README describes the finished Clocktopus. The firmware is at v0.8,
+This README describes the finished Clocktopus. The firmware is at v0.11,
 running on a breadboard prototype: a Teensy 4.1 with the 1.3" OLED, the
 navigation and tempo encoders, and one TRS MIDI output attached, powered over
 USB. As of 29 August 2026 it delivers a steady 24 PPQN USB MIDI clock with
@@ -163,4 +168,4 @@ on shifted and swung outputs.
 
 ---
 
-*Firmware: v0.8 — Platform: Teensy 4.1 — open hardware*
+*Firmware: v0.11 — Platform: Teensy 4.1 — open hardware*
