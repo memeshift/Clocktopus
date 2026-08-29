@@ -31,6 +31,31 @@
 // ============================================================================
 //  CHANGELOG
 //
+//  v0.13 — 2026-08-29
+//    Header and spacing refinements on top of v0.12.
+//
+//    The BPM readout is centred rather than left-aligned, and re-centres as
+//    the digit count changes. The threshold for that is 99.95, not 100:
+//    print(float, 1) rounds before printing, so 99.96 comes out as "100.0"
+//    while the value is still under 100.
+//
+//    A speed multiplier keeps the right edge and the tempo centres in what
+//    is left, so it shifts aside rather than colliding. Half speed with a
+//    three-digit tempo still cannot fit — "150.0 BPM" plus "x0.5" is 132px on
+//    a 128px screen — and now clamps to x=0 instead of going negative.
+//    Unreachable until the speed switch on pins 21/22 exists.
+//
+//    Padding above and below the separator is now equal at five blank rows.
+//    That is measured from ink, not from the cursor: the Adafruit 5x7 glyph
+//    sits in a 6x8 cell, so at size 2 the tempo inks only rows 0-13 and the
+//    bottom two rows of its cell are empty. Matching the cursor positions
+//    instead would leave 5 above and 3 below, which is what it looked like.
+//
+//    ⚠ The parameter list is now at the floor. Its size-2 value inks rows
+//    50-63 and row 63 is the last on the panel. Nothing below it can move
+//    again without shrinking something. The two hint lines stayed at y=55 for
+//    the same reason — they were already flush and could not follow the shift.
+//
 //  v0.12 — 2026-08-29
 //    Display rework, all screens.
 //
@@ -1598,12 +1623,12 @@ void drawParamChevrons(bool hasAbove, bool hasBelow) {
   const int16_t w  = 4;    // half-width at the open end
 
   if (hasAbove && hasBelow) {
-    display.fillTriangle(cx, 44, cx - w, 50, cx + w, 50, SH110X_WHITE);
-    display.fillTriangle(cx - w, 52, cx + w, 52, cx, 58, SH110X_WHITE);
+    display.fillTriangle(cx, 48, cx - w, 54, cx + w, 54, SH110X_WHITE);
+    display.fillTriangle(cx - w, 56, cx + w, 56, cx, 62, SH110X_WHITE);
   } else if (hasBelow) {
-    display.fillTriangle(cx - w, 46, cx + w, 46, cx, 58, SH110X_WHITE);
+    display.fillTriangle(cx - w, 50, cx + w, 50, cx, 62, SH110X_WHITE);
   } else if (hasAbove) {
-    display.fillTriangle(cx, 46, cx - w, 58, cx + w, 58, SH110X_WHITE);
+    display.fillTriangle(cx, 50, cx - w, 62, cx + w, 62, SH110X_WHITE);
   }
 }
 
@@ -1622,15 +1647,25 @@ void updateDisplay() {
   bool blinkOff = ((millis() / MUTE_BLINK_MS) & 1) != 0;
 
   if (clockRunning || !blinkOff) {
-    display.setTextSize(2);
-    display.setCursor(0, 0);
-    display.print(effectiveBPM, 1);
-    display.print(" BPM");
-
-    // Speed multiplier, right-aligned at single size (only shown when not 1x)
+    // Speed multiplier keeps the right edge; the BPM readout is centred in
+    // whatever is left of the line, so it stays centred on a bare screen and
+    // simply shifts left when a multiplier appears.
     const char* mult = nullptr;
     if      (speedMultiplier == 0.5f) mult = "x0.5";
     else if (speedMultiplier == 2.0f) mult = "x2";
+    int16_t multW = mult ? (int16_t)strlen(mult) * 6 + 3 : 0;
+
+    // print(float, 1) yields 4 glyphs below 100 and 5 at or above it. The
+    // 99.95 threshold matches where its rounding tips over, not 100.
+    uint8_t bpmChars = ((effectiveBPM >= 99.95f) ? 5 : 4) + 4;   // + " BPM"
+    int16_t x = (128 - multW - (int16_t)bpmChars * 12) / 2;
+    if (x < 0) x = 0;
+
+    display.setTextSize(2);
+    display.setCursor(x, 0);
+    display.print(effectiveBPM, 1);
+    display.print(" BPM");
+
     if (mult) {
       display.setTextSize(1);
       display.setCursor(128 - (int16_t)strlen(mult) * 6, 4);
@@ -1654,7 +1689,9 @@ void updateDisplay() {
       int col = (i % 4) * 32;
       // Divider is drawn on row 19, so 21 leaves exactly one blank row under
       // it — matching the submenus, which start at 21 too.
-      int row = (i / 4) * 10 + 21;
+      // Divider is on row 19 and the size-2 tempo above it inks up to row 13,
+      // leaving 5 blank rows. 25 leaves the same 5 beneath it.
+      int row = (i / 4) * 10 + 25;
       display.setCursor(col, row);
       // ">" = selected; "*" = port has a nonzero time shift (off the grid)
       if (i == selectedPort)          display.print(">");
@@ -1667,7 +1704,7 @@ void updateDisplay() {
 
     // Selected port detail at bottom — shows the time shift when nonzero
     // (a stray shift should never be invisible), swing otherwise.
-    display.setCursor(0, 46);
+    display.setCursor(0, 50);
     display.print("P");
     display.print(selectedPort + 1);
     display.print(": ");
@@ -1686,23 +1723,23 @@ void updateDisplay() {
     // size. Splitting the name off its value is what lets the value be large —
     // "Division: MIDI(24)" on one line at size 2 would be 216px wide.
     bool isMidi = (ports[selectedPort].type == PORT_MIDI);
-    centerCursor(isMidi ? 13 : 11, 1, 21);          // "PORT n - MIDI" / " - CV"
+    centerCursor(isMidi ? 13 : 11, 1, 25);          // "PORT n - MIDI" / " - CV"
     display.print("PORT ");
     display.print(selectedPort + 1);
     display.print(" - ");
     display.print(isMidi ? "MIDI" : "CV");
 
-    centerCursor(strlen(paramNames[selectedParam]), 1, 34);
+    centerCursor(strlen(paramNames[selectedParam]), 1, 38);
     display.print(paramNames[selectedParam]);
 
-    centerCursor(paramValueChars(selectedPort, selectedParam), 2, 46);
+    centerCursor(paramValueChars(selectedPort, selectedParam), 2, 50);
     printParamValue(selectedPort, selectedParam);
 
     // Chevrons stay in the left gutter, level with the value row.
     drawParamChevrons(selectedParam > 0, selectedParam < PARAM_COUNT - 1);
 
   } else if (currentLevel == LEVEL_VALUE_EDIT) {
-    centerCursor(9 + strlen(paramNames[selectedParam]), 1, 21);
+    centerCursor(9 + strlen(paramNames[selectedParam]), 1, 25);
     display.print("PORT ");
     display.print(selectedPort + 1);
     display.print(" - ");
@@ -1718,7 +1755,7 @@ void updateDisplay() {
     uint8_t vc = paramValueChars(selectedPort, selectedParam);
 
     if (valueLocked) {
-      centerCursor(vc + 2, 2, 34);                  // "[value]"
+      centerCursor(vc + 2, 2, 38);                  // "[value]"
       display.print("[");
       printParamValue(selectedPort, selectedParam);
       display.print("]");
@@ -1731,7 +1768,7 @@ void updateDisplay() {
 
     } else if (selectedParam == PARAM_SHIFT) {
       // Shift keeps a hint line, so its value sits a little higher.
-      centerCursor(vc + 2, 2, 34);                  // "<value>"
+      centerCursor(vc + 2, 2, 38);                  // "<value>"
       display.print("<");
       printParamValue(selectedPort, selectedParam);
       display.print(">");
@@ -1741,7 +1778,7 @@ void updateDisplay() {
       display.print(hint);
 
     } else {
-      centerCursor(vc + 2, 2, 38);                  // "<value>"
+      centerCursor(vc + 2, 2, 42);                  // "<value>"
       display.print("<");
       printParamValue(selectedPort, selectedParam);
       display.print(">");
