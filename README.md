@@ -84,9 +84,10 @@ Clocktopus soothes the stress of syncing your gear so you can play with other pe
   whole setup at a glance
 - **Colour-coded by output type** — blue glow for MIDI outputs, green
   glow for CV outputs, white flash for main clock pulse
-- **OLED display** — shows current BPM, running/stopped status, selected
-  port, and all per-port settings; three-level navigation menu for
-  configuring each output
+- **OLED display** — shows current BPM, selected port and all per-port
+  settings; three-level navigation menu for configuring each output. Transport
+  state needs no words: the BPM readout blinks when the clock is stopped and
+  holds steady when it runs
 
 ---
 
@@ -97,7 +98,8 @@ Clocktopus soothes the stress of syncing your gear so you can play with other pe
 - **Navigation encoder** — push-turn encoder for navigating and editing
   all per-port settings without menus getting in the way of playing
 - **Three-level settings hierarchy** — select port → select parameter →
-  edit value; long-press returns to the top level from anywhere
+  edit value; long-press returns to the top level from anywhere below the
+  overview, where it mutes the selected port instead
 - **Port mute** — long-press on a port in the overview mutes or unmutes it.
   Muted ports blink on the display, and a muted MIDI port is sent STOP so its
   follower parks cleanly rather than hanging on a clock that stopped arriving

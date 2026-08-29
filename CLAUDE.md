@@ -115,6 +115,15 @@ These shape code, docs, naming, and hardware decisions — not just marketing co
   the board into the bootloader and stops the sketch. Power-cycle USB to reboot.
 - A flash is only proven when /dev/cu.usbmodem* reappears. arduino-cli's upload
   prints "New upload port" and exits 0 whether or not the flash landed.
+- v0.12 (2026-08-29) display rework, flashed and bench-checked: transport state
+  is carried by the BPM readout blinking rather than the words RUNNING/STOPPED,
+  which reclaimed a whole line and moved every screen up 8px; both submenus are
+  centred with the value at double size; the parameter list splits name from
+  value so the value can be large, with chevrons in the left gutter for position.
+  Centring uses glyph counts, not composed strings — snprintf costs ~26KB here.
+- A single-row parameter menu at double size with horizontal scrolling was built
+  and rejected the same day: size 2 leaves only 110px, so nearly every row
+  scrolled. The chevrons survived; the scrolling did not.
 - Still unwired and untested: NeoPixels, CV outs, MIDI ports 2-8. Port 1 now
   runs into a real Thonkiconn jack rather than clip leads (33R to tip, 33R from
   3.3V to ring, GND to sleeve); the v0.7 remap that frees ports 2-8 remains

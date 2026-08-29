@@ -31,6 +31,36 @@
 // ============================================================================
 //  CHANGELOG
 //
+//  v0.12 — 2026-08-29
+//    Display rework, all screens.
+//
+//    Transport state is no longer a word. ">>> RUNNING" and "--- STOPPED" are
+//    gone; the BPM readout blinks when the clock is stopped and holds steady
+//    when it runs. That reclaims the whole line the text occupied, so the
+//    separator moved from y=27 to y=19 and every screen below it moved up 8px.
+//    The blink only runs while stopped — when nothing is firing — so the
+//    forced redraws it needs cost no pulse jitter, unlike the mute blink.
+//
+//    Both submenus are centred and the value is now double size. The parameter
+//    list splits name from value across two rows, which is the only way the
+//    value can be large: "Division: MIDI(24)" on one line at size 2 would be
+//    216px on a 128px screen.
+//
+//    Position in the parameter list is carried by chevrons in the left gutter
+//    rather than by which of three rows holds a marker — down alone at the
+//    top, up alone at the bottom, the two meeting at their open ends between.
+//
+//    Three width bugs found by checking the arithmetic rather than trusting it:
+//    "PORT n - " is 9 glyphs and was being centred as 8; "< MIDI(24) >" at
+//    size 2 is 144px, so the padding spaces were dropped; and
+//    "LOCKED - CV ports only" is 132px, wider than the display, which the old
+//    left-aligned code had been silently clipping. Shortened to "LOCKED - CV
+//    only". The shift hint lost its leading "ms" because the value now carries
+//    the unit itself.
+//
+//    Centring computes widths from glyph counts rather than composing strings,
+//    which keeps snprintf and its ~26KB of formatting code out of the build.
+//
 //  v0.11 — 2026-08-29
 //    Muting a MIDI port now sends it STOP, and unmuting sends CONTINUE. The
 //    follower parks and resumes cleanly instead of hanging on a clock that
@@ -447,6 +477,7 @@ const uint16_t LONG_PRESS_MS = 600;
 
 // Muted ports blink on the overview at this half-period (milliseconds).
 const uint16_t MUTE_BLINK_MS = 400;
+
 
 // Internal resolution: 96 PPQN (ticks per quarter note).
 // 96 divides cleanly into all standard musical subdivisions:
@@ -1517,32 +1548,97 @@ void printShiftValue(int8_t shiftHalfMs) {
   display.print(shiftHalfMs * 0.5f, 1);
 }
 
+// Place the cursor so `chars` glyphs at `size` sit centred across the 128px
+// display. Widths are computed from the glyph count rather than the composed
+// string, which keeps snprintf and its ~26KB of formatting code out of the build.
+void centerCursor(uint8_t chars, uint8_t size, int16_t y) {
+  display.setTextSize(size);
+  display.setCursor((128 - (int16_t)chars * 6 * size) / 2, y);
+}
+
+// Glyph count of a parameter's value, so it can be centred before printing.
+uint8_t paramValueChars(uint8_t port, uint8_t param) {
+  const PortConfig& p = ports[port];
+  switch (param) {
+    case PARAM_TYPE:     return p.type == PORT_MIDI ? 4 : 2;
+    case PARAM_DIVISION: return strlen(divisionNames[p.division]);
+    case PARAM_SHIFT: {
+      if (p.shift == 0) return 1;
+      int whole = (p.shift < 0 ? -p.shift : p.shift) / 2;   // whole milliseconds
+      return 1 + (whole >= 10 ? 2 : 1) + 2 + 2;             // sign digits .d ms
+    }
+    case PARAM_SWING:    return 3;                          // swing is 50..90
+    default: return 0;
+  }
+}
+
+// Print a parameter's value at the current cursor. Pairs with paramValueChars.
+void printParamValue(uint8_t port, uint8_t param) {
+  const PortConfig& p = ports[port];
+  switch (param) {
+    case PARAM_TYPE:     display.print(p.type == PORT_MIDI ? "MIDI" : "CV"); break;
+    case PARAM_DIVISION: display.print(divisionNames[p.division]);           break;
+    case PARAM_SHIFT:
+      printShiftValue(p.shift);
+      if (p.shift != 0) display.print("ms");
+      break;
+    case PARAM_SWING:
+      display.print(p.swing);
+      display.print("%");
+      break;
+    default: break;
+  }
+}
+
+// Scroll-position marker for the single-row parameter screen, drawn in the
+// left gutter. Down chevron = more rows below, up chevron = more above, and
+// both together = rows in either direction, meeting at their open ends.
+void drawParamChevrons(bool hasAbove, bool hasBelow) {
+  const int16_t cx = 7;    // gutter centre
+  const int16_t w  = 4;    // half-width at the open end
+
+  if (hasAbove && hasBelow) {
+    display.fillTriangle(cx, 44, cx - w, 50, cx + w, 50, SH110X_WHITE);
+    display.fillTriangle(cx - w, 52, cx + w, 52, cx, 58, SH110X_WHITE);
+  } else if (hasBelow) {
+    display.fillTriangle(cx - w, 46, cx + w, 46, cx, 58, SH110X_WHITE);
+  } else if (hasAbove) {
+    display.fillTriangle(cx, 46, cx - w, 58, cx + w, 58, SH110X_WHITE);
+  }
+}
+
 void updateDisplay() {
   display.clearDisplay();
   display.setTextColor(SH110X_WHITE);
 
   float effectiveBPM = bpm * speedMultiplier;
 
-  // ── BPM header (always shown) ─────────────────────────────────────────────
-  display.setTextSize(2);
-  display.setCursor(0, 0);
-  display.print(effectiveBPM, 1);
-  display.print(" BPM");
+  // ── BPM header ────────────────────────────────────────────────────────────
+  // Transport state is carried by the blink itself, not by a word: steady
+  // means running, blinking means stopped. That frees the whole line the
+  // RUNNING/STOPPED text used to occupy, so everything below moved up 8px.
+  // The blink only runs while stopped, when nothing is firing, so the forced
+  // redraws it needs cost no pulse jitter.
+  bool blinkOff = ((millis() / MUTE_BLINK_MS) & 1) != 0;
 
-  // Running/stopped indicator
-  display.setTextSize(1);
-  display.setCursor(0, 18);
-  if (clockRunning) {
-    display.print(">>> RUNNING");
-  } else {
-    display.print("--- STOPPED");
+  if (clockRunning || !blinkOff) {
+    display.setTextSize(2);
+    display.setCursor(0, 0);
+    display.print(effectiveBPM, 1);
+    display.print(" BPM");
+
+    // Speed multiplier, right-aligned at single size (only shown when not 1x)
+    const char* mult = nullptr;
+    if      (speedMultiplier == 0.5f) mult = "x0.5";
+    else if (speedMultiplier == 2.0f) mult = "x2";
+    if (mult) {
+      display.setTextSize(1);
+      display.setCursor(128 - (int16_t)strlen(mult) * 6, 4);
+      display.print(mult);
+    }
   }
 
-  // Speed multiplier indicator (only shown when not at 1×)
-  if (speedMultiplier == 0.5f)      display.print(" x0.5");
-  else if (speedMultiplier == 2.0f) display.print(" x2");
-
-  display.drawLine(0, 27, 127, 27, SH110X_WHITE);  // separator line
+  display.drawLine(0, 19, 127, 19, SH110X_WHITE);  // separator line
 
   // ── Level-specific content ─────────────────────────────────────────────────
 
@@ -1556,7 +1652,9 @@ void updateDisplay() {
     for (int i = 0; i < 8; i++) {
       if (!ports[i].enabled && blinkOff) continue;
       int col = (i % 4) * 32;
-      int row = (i / 4) * 10 + 30;
+      // Divider is drawn on row 19, so 21 leaves exactly one blank row under
+      // it — matching the submenus, which start at 21 too.
+      int row = (i / 4) * 10 + 21;
       display.setCursor(col, row);
       // ">" = selected; "*" = port has a nonzero time shift (off the grid)
       if (i == selectedPort)          display.print(">");
@@ -1569,7 +1667,7 @@ void updateDisplay() {
 
     // Selected port detail at bottom — shows the time shift when nonzero
     // (a stray shift should never be invisible), swing otherwise.
-    display.setCursor(0, 54);
+    display.setCursor(0, 46);
     display.print("P");
     display.print(selectedPort + 1);
     display.print(": ");
@@ -1584,50 +1682,29 @@ void updateDisplay() {
     }
 
   } else if (currentLevel == LEVEL_PARAM_SELECT) {
-    display.setTextSize(1);
-    display.setCursor(0, 29);
+    // Three centred rows: which port, which parameter, and its value at double
+    // size. Splitting the name off its value is what lets the value be large —
+    // "Division: MIDI(24)" on one line at size 2 would be 216px wide.
+    bool isMidi = (ports[selectedPort].type == PORT_MIDI);
+    centerCursor(isMidi ? 13 : 11, 1, 21);          // "PORT n - MIDI" / " - CV"
     display.print("PORT ");
     display.print(selectedPort + 1);
     display.print(" - ");
-    display.print(ports[selectedPort].type == PORT_MIDI ? "MIDI" : "CV  ");
+    display.print(isMidi ? "MIDI" : "CV");
 
-    // Five parameters no longer fit under the header on the 64px display —
-    // show a 3-row window that scrolls with the selection.
-    int firstRow = (int)selectedParam - 1;
-    if (firstRow < 0) firstRow = 0;
-    if (firstRow > PARAM_COUNT - 3) firstRow = PARAM_COUNT - 3;
+    centerCursor(strlen(paramNames[selectedParam]), 1, 34);
+    display.print(paramNames[selectedParam]);
 
-    for (int row = 0; row < 3; row++) {
-      int i = firstRow + row;
-      display.setCursor(0, 40 + row * 8);
-      display.print(i == (int)selectedParam ? "> " : "  ");
-      display.print(paramNames[i]);
-      display.print(": ");
+    centerCursor(paramValueChars(selectedPort, selectedParam), 2, 46);
+    printParamValue(selectedPort, selectedParam);
 
-      switch (i) {
-        case PARAM_TYPE:
-          display.print(ports[selectedPort].type == PORT_MIDI ? "MIDI" : "CV");
-          break;
-        case PARAM_DIVISION:
-          display.print(divisionNames[ports[selectedPort].division]);
-          break;
-        case PARAM_SHIFT:
-          printShiftValue(ports[selectedPort].shift);
-          if (ports[selectedPort].shift != 0) display.print("ms");
-          break;
-        case PARAM_SWING:
-          display.print(ports[selectedPort].swing);
-          display.print("%");
-          break;
-      }
-    }
+    // Chevrons stay in the left gutter, level with the value row.
+    drawParamChevrons(selectedParam > 0, selectedParam < PARAM_COUNT - 1);
 
   } else if (currentLevel == LEVEL_VALUE_EDIT) {
-    display.setTextSize(1);
-    display.setCursor(0, 29);
+    centerCursor(9 + strlen(paramNames[selectedParam]), 1, 21);
     display.print("PORT ");
     display.print(selectedPort + 1);
-
     display.print(" - ");
     display.print(paramNames[selectedParam]);
 
@@ -1638,57 +1715,36 @@ void updateDisplay() {
                         (selectedParam == PARAM_DIVISION ||
                          selectedParam == PARAM_SWING));
 
+    uint8_t vc = paramValueChars(selectedPort, selectedParam);
+
     if (valueLocked) {
-      display.setTextSize(2);
-      display.setCursor(0, 38);
+      centerCursor(vc + 2, 2, 34);                  // "[value]"
       display.print("[");
-      if (selectedParam == PARAM_DIVISION) {
-        display.print(divisionNames[ports[selectedPort].division]);
-      } else {
-        display.print(ports[selectedPort].swing);
-        display.print("%");
-      }
+      printParamValue(selectedPort, selectedParam);
       display.print("]");
-      display.setTextSize(1);
-      display.setCursor(0, 56);
-      display.print(selectedParam == PARAM_DIVISION
-                    ? "LOCKED - MIDI 24 PPQN"
-                    : "LOCKED - CV ports only");
+
+      const char* hint = (selectedParam == PARAM_DIVISION)
+                         ? "LOCKED - MIDI 24 PPQN"
+                         : "LOCKED - CV only";
+      centerCursor(strlen(hint), 1, 55);
+      display.print(hint);
 
     } else if (selectedParam == PARAM_SHIFT) {
-      // Shift gets its own layout: value raised to make room for a hint line.
-      display.setTextSize(2);
-      display.setCursor(10, 38);
-      display.print("< ");
-      printShiftValue(ports[selectedPort].shift);
-      display.print(" >");
-      display.setTextSize(1);
-      display.setCursor(0, 56);
-      display.print("ms  (long-press = 0)");
+      // Shift keeps a hint line, so its value sits a little higher.
+      centerCursor(vc + 2, 2, 34);                  // "<value>"
+      display.print("<");
+      printParamValue(selectedPort, selectedParam);
+      display.print(">");
+
+      const char* hint = "long-press = 0";
+      centerCursor(strlen(hint), 1, 55);
+      display.print(hint);
 
     } else {
-      // Show current value large, centred, with < > arrows
-      display.setTextSize(2);
-      display.setCursor(10, 42);
-      display.print("< ");
-
-      switch (selectedParam) {
-        case PARAM_TYPE:
-          display.print(ports[selectedPort].type == PORT_MIDI ? "MIDI" : "CV  ");
-          break;
-        case PARAM_DIVISION:
-          display.print(divisionNames[ports[selectedPort].division]);
-          break;
-        case PARAM_SWING:
-          display.print(ports[selectedPort].swing);
-          display.print("%");
-          break;
-
-        default:
-          break;
-      }
-
-      display.print(" >");
+      centerCursor(vc + 2, 2, 38);                  // "<value>"
+      display.print("<");
+      printParamValue(selectedPort, selectedParam);
+      display.print(">");
     }
   }
 
@@ -1776,13 +1832,19 @@ void loop() {
   // otherwise never do. Gated on the overview being visible AND something being
   // muted, so an all-live rig pays nothing — each redraw costs ~6ms of loop
   // latency, which shows up as jitter on shifted and swung pulses.
-  if (currentLevel == LEVEL_PORT_SELECT) {
+  {
     static uint8_t lastBlinkPhase = 0;
     uint8_t phase = (millis() / MUTE_BLINK_MS) & 1;
     if (phase != lastBlinkPhase) {
       lastBlinkPhase = phase;
-      for (int i = 0; i < 8; i++) {
-        if (!ports[i].enabled) { displayNeedsUpdate = true; break; }
+      if (!clockRunning) {
+        // Stopped: the BPM readout blinks. Nothing is firing, so the redraw
+        // costs no pulse jitter.
+        displayNeedsUpdate = true;
+      } else if (currentLevel == LEVEL_PORT_SELECT) {
+        for (int i = 0; i < 8; i++) {
+          if (!ports[i].enabled) { displayNeedsUpdate = true; break; }
+        }
       }
     }
   }
